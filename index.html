@@ -121,6 +121,20 @@ window.addEventListener("load",function setupPdf(){
   .live .lbl .bd{width:7px;height:7px;border-radius:50%;background:var(--hot);animation:pl 1.4s infinite}
   .live .txt{font-size:15px;line-height:1.55;min-height:22px;max-height:42vh;overflow-y:auto;scroll-behavior:smooth}
   .live .txt::-webkit-scrollbar{display:none}
+  /* Auto-scroll paused pill: shown when the user jumps from a recap card to a
+     transcript section (or scrolls up manually) so the live tail doesn't yank
+     the scroll position back while they read. Tap to resume immediately. */
+  .as-pause{position:absolute;left:50%;bottom:8px;transform:translateX(-50%) translateY(8px);
+    background:rgba(20,32,60,.95);border:1px solid var(--accent);color:var(--accent2);
+    font-size:11px;font-weight:700;padding:6px 12px;border-radius:999px;display:none;
+    align-items:center;gap:7px;z-index:5;cursor:pointer;backdrop-filter:blur(6px);
+    -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4);opacity:0;transition:opacity .25s,transform .25s;
+    -webkit-tap-highlight-color:transparent;white-space:nowrap;max-width:90%}
+  .as-pause.show{display:inline-flex;opacity:1;transform:translateX(-50%) translateY(0)}
+  .as-pause:active{transform:translateX(-50%) scale(.96)}
+  .as-pause .pdot{width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 6px var(--gold);flex:none}
+  .as-pause .pnew{background:var(--hot);color:#fff;border-radius:999px;padding:1px 6px;font-size:10px;font-weight:800;margin-left:2px}
   .live .interim{color:var(--mut);font-style:italic}
   /* Speaker colors — bright, high-contrast against the dark cards */
   .sp-0{color:#7ee0ff}.sp-1{color:#ffd166}.sp-2{color:#5effa0}
@@ -419,6 +433,7 @@ window.addEventListener("load",function setupPdf(){
     <div class="live" id="liveCard">
       <div class="lbl"><span class="bd"></span> Live transcript</div>
       <div class="txt" id="liveTxt"><span class="cursor"></span></div>
+      <div class="as-pause" id="asPause" role="button" tabindex="0" aria-label="Resume auto-scroll"></div>
     </div>
     <div id="chapters"></div>
     <div class="empty" id="empty">
@@ -853,20 +868,42 @@ const LLM = {
   // Low-level: send system+user, return raw text (or null if no LLM available).
   async _raw(system, user, maxTokens){
     if(settings.provider==="ollama" && this.hasKey){
+      // Pre-flight: probe the local server AND confirm the configured model is
+      // installed. Throws a tagged error (OLLAMA_DOWN / OLLAMA_MODEL_MISSING)
+      // before we even issue the chat request — otherwise the fetch can hang
+      // for 30+ seconds on a cold/dead server and the recap silently falls
+      // back to the on-device version with no signal that Ollama failed.
+      await ensureOllamaReady();
       // Ollama local chat API: POST {endpoint}/api/chat with a messages array.
       // Runs on the user's machine; no auth header. The "stream:false" flag
       // makes the call return a single JSON object instead of NDJSON chunks.
       const ep=getOllamaEndpoint().replace(/\/+$/,"");
-      const resp=await fetch(ep+"/api/chat",{
-        method:"POST",
-        headers:{"content-type":"application/json"},
-        body:JSON.stringify({
-          model:this.model,
-          stream:false,
-          messages:[{role:"system",content:system},{role:"user",content:user}],
-          options:{ num_predict: maxTokens||800 }
-        })
-      });
+      // Long timeout: Gemma3 can take 30-60s to cold-start on the first call
+      // after `ollama serve` boots, especially on CPU-only machines. 120s
+      // gives plenty of headroom while still failing eventually.
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),120000);
+      let resp;
+      try{
+        resp=await fetch(ep+"/api/chat",{
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({
+            model:this.model,
+            stream:false,
+            messages:[{role:"system",content:system},{role:"user",content:user}],
+            options:{ num_predict: maxTokens||800 }
+          }),
+          signal:ctrl.signal
+        });
+      }catch(e){
+        clearTimeout(t);
+        // Server went away mid-call (e.g. user killed `ollama serve`) or the
+        // request timed out. Surface as OLLAMA_DOWN so the same toast path
+        // fires and the user gets a clear remediation hint.
+        throw new Error("OLLAMA_DOWN");
+      }
+      clearTimeout(t);
       if(!resp.ok)throw new Error("Ollama API "+resp.status+" "+(await resp.text().catch(()=>"")));
       const data=await resp.json();
       return (data && data.message && data.message.content) || "";
@@ -1001,6 +1038,11 @@ const I18N={
     ollamaEndpoint:"Endpoint",ollamaModel:"Model",
     ollamaProbe:"Test connection",ollamaProbeOk:"Ollama reachable ✓",ollamaProbeErr:"Ollama not reachable — is the server running?",
     ollamaProbeChecking:"Checking…",
+    ollamaProbeModelMissing:"○ Model not installed — run: ollama pull gemma3",
+    ollamaErrServer:"Ollama not reachable. Start it (\"ollama serve\") and retry.",
+    ollamaErrModel:"Model \"{m}\" not installed. Run: ollama pull {m}",
+    ollamaRetrying:"Ollama warming up, retrying…",
+    autoScrollPaused:"Auto-scroll paused",autoScrollResume:"Tap to resume",autoScrollMissed:"{n} new",
     histTitle:"Saved sessions",noSessions:"No saved sessions yet.",sessionSaved:"Session saved",sessionDeleted:"Session deleted",sessionLoaded:"Session loaded",confirmDelete:"Delete this session?",
     open:"Open",del:"Delete",untitled:"Untitled session",
     askTitle:"Ask the transcript",askSub:"Ask anything about what was said. Answers use the transcript and your context — you can also ask questions about the attached documents even before transcribing.",
@@ -1057,6 +1099,11 @@ const I18N={
     ollamaEndpoint:"Endpoint",ollamaModel:"Modello",
     ollamaProbe:"Prova connessione",ollamaProbeOk:"Ollama raggiungibile ✓",ollamaProbeErr:"Ollama non raggiungibile — il server è in esecuzione?",
     ollamaProbeChecking:"Verifica…",
+    ollamaProbeModelMissing:"○ Modello non installato — esegui: ollama pull gemma3",
+    ollamaErrServer:"Ollama non raggiungibile. Avvialo (\"ollama serve\") e riprova.",
+    ollamaErrModel:"Modello \"{m}\" non installato. Esegui: ollama pull {m}",
+    ollamaRetrying:"Ollama in avvio, riprovo…",
+    autoScrollPaused:"Scorrimento automatico in pausa",autoScrollResume:"Tocca per riprendere",autoScrollMissed:"{n} nuovi",
     histTitle:"Sessioni salvate",noSessions:"Nessuna sessione salvata.",sessionSaved:"Sessione salvata",sessionDeleted:"Sessione eliminata",sessionLoaded:"Sessione caricata",confirmDelete:"Eliminare questa sessione?",
     open:"Apri",del:"Elimina",untitled:"Sessione senza titolo",
     askTitle:"Chiedi alla trascrizione",askSub:"Chiedi qualsiasi cosa su ciò che è stato detto. Le risposte usano la trascrizione e il tuo contesto — puoi anche fare domande sui documenti allegati prima di iniziare a trascrivere.",
@@ -1370,13 +1417,64 @@ function renderChapter(ch,i){
   el.querySelectorAll(".q").forEach(q=>q.addEventListener("click",()=>{navigator.clipboard?.writeText(q.textContent.trim());tt(I18N[uiLang].qCopied);}));
   return el;
 }
+/* Live-transcript auto-scroll management.
+   The transcript window (liveTxt) normally snaps to the bottom on every new
+   phrase so the user sees the latest text. But when the user clicks "Jump to
+   transcript" from a recap card (or scrolls up manually to read an earlier
+   section), that snap would yank them back to the bottom within a few hundred
+   milliseconds — making the jump useless while recording is active.
+   Solution: pause auto-scroll for ~6s after a jump (and indefinitely after a
+   manual scroll-up). Show a small floating pill so the user knows live updates
+   are paused and can resume with a tap. New-arrivals counter on the pill tells
+   them how many updates they've missed. */
+let transcriptAutoScroll=true;   // when false, renderLive() skips the scroll-snap
+let autoScrollPauseUntil=0;      // 0 = no auto-resume scheduled; >0 = resume timestamp
+let autoScrollMissed=0;          // # of renderLive updates that arrived while paused
+let _asResumeTimer=null;
+function updatePausePill(){
+  const pill=document.getElementById("asPause");
+  if(!pill)return;
+  if(transcriptAutoScroll){ pill.classList.remove("show"); return; }
+  const d=I18N[uiLang];
+  const missedLabel = autoScrollMissed>0 ? ` <span class="pnew">${d.autoScrollMissed.replace("{n}",autoScrollMissed)}</span>` : "";
+  pill.innerHTML = `<span class="pdot"></span><span>${d.autoScrollPaused}${missedLabel} · ${d.autoScrollResume}</span>`;
+  pill.classList.add("show");
+}
+function pauseAutoScroll(durationMs){
+  transcriptAutoScroll=false;
+  autoScrollPauseUntil = durationMs ? Date.now()+durationMs : 0;
+  if(_asResumeTimer){ clearTimeout(_asResumeTimer); _asResumeTimer=null; }
+  if(durationMs){
+    _asResumeTimer=setTimeout(()=>{
+      // Only auto-resume if the pause hasn't been extended (e.g. by another jump
+      // or by the user scrolling further). Manual scroll-up pauses with
+      // durationMs=0 and won't auto-resume.
+      if(autoScrollPauseUntil && Date.now()>=autoScrollPauseUntil){
+        resumeAutoScroll();
+      }
+    }, durationMs);
+  }
+  updatePausePill();
+}
+function resumeAutoScroll(){
+  transcriptAutoScroll=true;
+  autoScrollPauseUntil=0;
+  autoScrollMissed=0;
+  if(_asResumeTimer){ clearTimeout(_asResumeTimer); _asResumeTimer=null; }
+  updatePausePill();
+  // Snap to bottom immediately so the user sees the latest text.
+  try{ liveTxt.scrollTop=liveTxt.scrollHeight; }catch(_){}
+}
 /* Smooth-scroll to a chapter card or transcript block by id, opening the
    chapter if it's collapsed, and giving it a brief highlight so the jump
-   is obvious even on a long page. */
+   is obvious even on a long page. For transcript targets (seg-*) we also
+   pause live auto-scroll so the new text arriving doesn't steal the focus
+   back to the bottom while the user is reading the section they jumped to. */
 function jumpTo(id){
   const el=document.getElementById(id);
   if(!el)return;
   if(el.classList.contains("chap"))el.classList.add("open");
+  if(id.startsWith("seg-")) pauseAutoScroll(6000);   // give the user ~6s to read the section
   el.scrollIntoView({behavior:"smooth",block:"center"});
   el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");
   setTimeout(()=>el.classList.remove("flash"),900);
@@ -1674,7 +1772,14 @@ function renderLive(){
   const interimHtml=interim?`<span class="${pc(currentSpeaker).css}" style="opacity:.78">${esc(interim)}</span>`:"";
   const inner=(tail||interimHtml)?`${tail}${tail&&interimHtml?" ":""}${interimHtml}`:"";
   document.getElementById("segLive").innerHTML=`<div class="seg-live">${inner}<span class="cursor"></span></div>`;
-  liveTxt.scrollTop=liveTxt.scrollHeight;   // keep the latest text in view
+  if(transcriptAutoScroll){
+    liveTxt.scrollTop=liveTxt.scrollHeight;   // keep the latest text in view
+  } else {
+    // User is reading an earlier section — don't yank the scroll. Just count
+    // the missed updates so the pause pill can tell them what they're missing.
+    autoScrollMissed++;
+    updatePausePill();
+  }
 }
 
 /* pause detection */
@@ -1742,6 +1847,7 @@ async function start(){
   if(audioCtx&&audioCtx.state==="suspended"){try{await audioCtx.resume();}catch(_){}}
   if(!startRecog())return;
   recording=true;
+  resumeAutoScroll();   // starting fresh — user clearly wants to see the new text
   // start a fresh pitch window so stale samples don't bias the first utterance
   pitchSamples=[];lastUtteranceEnd=Date.now();lastActivityTs=Date.now();
   recBtn.classList.add("live");
@@ -1798,6 +1904,7 @@ $("#copy").addEventListener("click",async()=>{
 
 function doReset(){
   if(recording)stop();
+  resumeAutoScroll();   // clear any paused state from a previous session
   chapters=[];curBuf="";interim="";isFirstChapter=true;lastOverview=null;
   segments=[];speakers=[];pitchSamples=[];
   currentSpeaker=0;lastUtteranceEnd=0;lastActivityTs=0;
@@ -1897,19 +2004,79 @@ const KEY_PROVIDER_INFO={
   anthropic:{placeholder:"sk-ant-...", link:"https://console.anthropic.com/settings/keys", linkLabel:"console.anthropic.com"},
   glm:      {placeholder:"your GLM API key...", link:"https://open.bigmodel.cn/usercenter/apikeys", linkLabel:"open.bigmodel.cn"}
 };
-/* Cached "is Ollama reachable" probe result, so we don't refetch on every UI
-   paint. Refreshed on demand via the Test connection button. */
-let ollamaReachable=null;   // null = unknown, true/false = last probe result
-async function probeOllama(){
+/* Ollama reachability + model-availability probe.
+   - ollamaReachable: null = unknown, true/false = server is up/down
+   - ollamaModelReady: null = unknown, true/false = configured model is installed
+   - ollamaProbeAt: timestamp of the last successful probe (cached for OLLAMA_PROBE_TTL ms)
+   The probe is retried up to 3 times with a short gap so we don't false-negative
+   when the server is just coming up (e.g. user ran `ollama serve` a moment ago
+   and the daemon hasn't bound to the port yet). */
+let ollamaReachable=null;
+let ollamaModelReady=null;
+let ollamaProbeAt=0;
+const OLLAMA_PROBE_TTL=5000;   // cache the probe result for 5s between calls
+async function probeOllama(opts){
+  opts=opts||{};
   const ep=getOllamaEndpoint().replace(/\/+$/,"");
-  try{
-    const ctrl=new AbortController();
-    const t=setTimeout(()=>ctrl.abort(),3500);
-    const r=await fetch(ep+"/api/tags",{signal:ctrl.signal});
-    clearTimeout(t);
-    ollamaReachable=r.ok;
+  const model=getOllamaModel();
+  // Serve cached result unless the caller forces a fresh probe.
+  if(!opts.force && ollamaProbeAt && Date.now()-ollamaProbeAt<OLLAMA_PROBE_TTL){
     return ollamaReachable;
-  }catch(e){ ollamaReachable=false; return false; }
+  }
+  for(let attempt=0; attempt<3; attempt++){
+    try{
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),3500);
+      const r=await fetch(ep+"/api/tags",{signal:ctrl.signal});
+      clearTimeout(t);
+      ollamaReachable=r.ok;
+      ollamaProbeAt=Date.now();
+      if(!r.ok){ ollamaModelReady=false; return false; }
+      // Server is up — confirm the configured model is actually installed so
+      // we can guide the user to `ollama pull` instead of letting the chat
+      // call fail with a cryptic "model not found" error.
+      try{
+        const data=await r.json();
+        const models=Array.isArray(data&&data.models)?data.models.map(m=>m.name||m.model||""):[];
+        const want=model.split(":")[0];
+        ollamaModelReady = models.some(n=>n===model || (n&&n.split(":")[0]===want));
+      }catch(_){ ollamaModelReady=null; }
+      return ollamaReachable;
+    }catch(e){
+      if(attempt<2) await new Promise(r=>setTimeout(r,800));   // brief pause, then retry
+    }
+  }
+  ollamaReachable=false;
+  ollamaModelReady=false;
+  ollamaProbeAt=Date.now();
+  return false;
+}
+/* Pre-flight check before every Ollama LLM call. Throws a tagged error
+   ("OLLAMA_DOWN" / "OLLAMA_MODEL_MISSING") so callers can distinguish a
+   provider-outage from a normal transient failure, and shows an actionable,
+   rate-limited toast so the user knows exactly what to fix. Without this,
+   the fetch would hang for 30+ seconds before failing — and the chapter
+   recap would silently fall back to the on-device version with no signal
+   that Ollama was the problem. */
+let _lastOllamaErrType=null, _lastOllamaErrAt=0;
+function ollamaErrToast(type,msg){
+  const now=Date.now();
+  if(type===_lastOllamaErrType && now-_lastOllamaErrAt<8000) return;   // rate-limit: max one toast per 8s per error type
+  _lastOllamaErrType=type; _lastOllamaErrAt=now;
+  tt(msg);
+}
+async function ensureOllamaReady(){
+  await probeOllama({force:true});
+  const d=I18N[uiLang];
+  if(!ollamaReachable){
+    ollamaErrToast("down", d.ollamaErrServer);
+    throw new Error("OLLAMA_DOWN");
+  }
+  if(ollamaModelReady===false){
+    const m=getOllamaModel();
+    ollamaErrToast("model", d.ollamaErrModel.split("{m}").join(m));
+    throw new Error("OLLAMA_MODEL_MISSING");
+  }
 }
 function updateKeyUI(){
   const d=I18N[uiLang],st=document.getElementById("keyStatus"),btn=document.getElementById("keyBtn");
@@ -1932,7 +2099,8 @@ function updateKeyUI(){
     if(modelInput && document.activeElement!==modelInput)modelInput.value=getOllamaModel();
     const ost=document.getElementById("ollamaStatus");
     if(ost){
-      if(ollamaReachable===true){ost.textContent=d.ollamaConnected;ost.className="mstatus ok";}
+      if(ollamaReachable===true && ollamaModelReady===false){ost.textContent=d.ollamaProbeModelMissing;ost.className="mstatus off";}
+      else if(ollamaReachable===true){ost.textContent=d.ollamaConnected;ost.className="mstatus ok";}
       else if(ollamaReachable===false){ost.textContent=d.ollamaNotConnected;ost.className="mstatus off";}
       else {ost.textContent=d.ollamaProbeChecking;ost.className="mstatus off";}
     }
@@ -2250,6 +2418,27 @@ async function sendAsk(){
 }
 $("#askSend").addEventListener("click",sendAsk);
 $("#askInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendAsk();});
+
+// Auto-scroll pause/resume wiring for the live transcript window.
+// The handler is DEBOUNCED: it only runs ~250ms after the last scroll event,
+// so the intermediate scroll events fired by smooth-scroll animations (from
+// jumpTo's scrollIntoView or resumeAutoScroll's snap-to-bottom) don't
+// spuriously trigger a pause or resume. Only settled scroll positions —
+// i.e. real user scrolls — actually trigger state changes.
+let _liveScrollSettleTimer=null;
+liveTxt.addEventListener("scroll", ()=>{
+  if(_liveScrollSettleTimer) clearTimeout(_liveScrollSettleTimer);
+  _liveScrollSettleTimer=setTimeout(()=>{
+    const distFromBottom = liveTxt.scrollHeight - liveTxt.scrollTop - liveTxt.clientHeight;
+    if(distFromBottom < 24){
+      if(!transcriptAutoScroll) resumeAutoScroll();   // back at bottom → resume
+    } else if(transcriptAutoScroll && Date.now() > autoScrollPauseUntil){
+      pauseAutoScroll(0);   // user manually scrolled up — pause indefinitely
+    }
+  }, 250);
+});
+$("#asPause").addEventListener("click", resumeAutoScroll);
+$("#asPause").addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); resumeAutoScroll(); } });
 
 loadSettings();loadContext();
 applyUI();updateRecapBtn();updateKeyUI();syncSettings();updateCtxBtn();
