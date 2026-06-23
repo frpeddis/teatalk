@@ -1,0 +1,2258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Smart reporter</title>
+<!-- Document parsing libs (loaded lazily, only used when user attaches a PDF/Word/PPT file).
+     - PDF.js: Mozilla's PDF parser, runs fully client-side.
+     - Mammoth.js: extracts plain text from .docx (Word) files.
+     - JSZip: opens .pptx (which is a ZIP of XML slides) so we can read slide text. -->
+<script>
+// Configure PDF.js worker as soon as the lib is available.
+window.addEventListener("load",function setupPdf(){
+  if(window.pdfjsLib){
+    try{ pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; }catch(e){}
+  } else { setTimeout(setupPdf,80); }
+});
+</script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg:#04102b; --bg-b:#2f74bd; --bg2:#0c2b5c; --card:#13233f; --card2:#1a3155; --card3:#234070;
+    --accent:#4f8cff; --accent2:#37d6ff; --accent3:#6aa8ff; --hot:#ff4d6d;
+    --txt:#f2f6ff; --mut:#9db3d6; --line:rgba(255,255,255,.10);
+    --ok:#3ddc97; --gold:#ffd166;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+    background:
+      radial-gradient(120% 70% at 80% -10%, rgba(90,170,255,.22) 0%, transparent 55%),
+      radial-gradient(120% 80% at 10% -5%, rgba(0,212,255,.16) 0%, transparent 50%),
+      linear-gradient(180deg, var(--bg) 0%, #0c2b5c 42%, #1a4d8f 72%, var(--bg-b) 100%);
+    color:var(--txt);overflow:hidden;position:fixed;inset:0;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .app{display:flex;flex-direction:column;height:100%}
+
+  /* Header */
+  .hd{padding:14px 18px 8px;display:flex;flex-direction:column;gap:10px}
+  .brand{display:flex;align-items:center;gap:11px}
+  .logo{width:34px;height:34px;border-radius:11px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:grid;place-items:center;font-weight:800;font-size:17px;color:#fff;
+    box-shadow:0 6px 20px rgba(124,92,255,.5);position:relative;overflow:hidden;flex:none}
+  .logo::after{content:"";position:absolute;inset:0;background:linear-gradient(135deg,transparent 40%,rgba(255,255,255,.35) 50%,transparent 60%);
+    transform:translateX(-120%);animation:sheen 4s ease-in-out infinite}
+  @keyframes sheen{0%,70%{transform:translateX(-120%)}85%,100%{transform:translateX(120%)}}
+  .brand h1{font-size:17px;font-weight:800;letter-spacing:-.4px;white-space:nowrap}
+  .brand p{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .toolbar{display:flex;align-items:center;gap:6px;overflow-x:auto;padding-bottom:1px;scrollbar-width:none}
+  .toolbar::-webkit-scrollbar{display:none}
+  .hd-div{flex:none;width:1px;height:20px;background:var(--line);margin:0 2px}
+
+  .lang{display:flex;background:var(--card);border-radius:12px;padding:3px;border:1px solid var(--line)}
+  .lang button{border:0;background:transparent;color:var(--mut);font-weight:800;font-size:12px;
+    padding:6px 11px;border-radius:9px;transition:.25s;cursor:pointer;font-family:inherit}
+  .lang button.on{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 3px 12px rgba(124,92,255,.45)}
+
+  .status{padding:3px 18px 4px;font-size:12px;color:var(--mut);display:flex;align-items:center;gap:7px;min-height:20px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut);transition:.3s;flex:none}
+  .dot.live{background:var(--hot);animation:pl 1.4s infinite}
+  @keyframes pl{0%{box-shadow:0 0 0 0 rgba(255,77,109,.6)}70%{box-shadow:0 0 0 9px rgba(255,77,109,0)}100%{box-shadow:0 0 0 0 rgba(255,77,109,0)}}
+  .stat-words{margin-left:auto;font-size:11px;color:var(--mut)}
+
+  .scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 14px 160px}
+  .scroll::-webkit-scrollbar{display:none}
+
+  /* Recap (overview) panel — uniform light-blue fill */
+  .overview{background:rgba(94,160,240,.16);
+    border:1px solid rgba(120,180,255,.42);border-radius:20px;padding:16px;margin-bottom:14px;
+    position:relative;overflow:hidden;animation:rise .5s cubic-bezier(.2,.8,.2,1) both;display:none}
+  .ov-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  /* Recap actions (copy / forward / save) */
+  .ov-actions{display:flex;gap:7px;margin-bottom:13px;flex-wrap:wrap}
+  .ov-act{display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.22);border:1px solid var(--line);
+    color:var(--txt);font-family:inherit;font-weight:700;font-size:11.5px;padding:7px 12px;border-radius:10px;cursor:pointer;transition:.18s}
+  .ov-act:hover{border-color:rgba(120,180,255,.6);color:var(--accent2)}
+  .ov-act:active{transform:scale(.95)}
+  .ov-act svg{width:14px;height:14px}
+  .ov-hd .ic{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--gold),#ff9e64);
+    display:grid;place-items:center;font-size:14px}
+  .ov-hd .ti{font-size:14px;font-weight:800;letter-spacing:-.2px}
+  .ov-hd .tm{font-size:10px;color:var(--mut);margin-left:auto}
+  .ov-recap{font-size:13.5px;line-height:1.6;color:#e6e6f4;margin-bottom:14px}
+  .ov-sections{margin:0 0 14px}
+  .ov-sec{background:rgba(0,0,0,.18);border:1px solid var(--line);border-radius:13px;padding:11px 13px;margin-bottom:9px}
+  .ov-sec-hd{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:800;letter-spacing:-.2px;color:#eaf1ff;margin-bottom:6px}
+  .ov-sec-n{width:21px;height:21px;flex:none;border-radius:7px;display:grid;place-items:center;font-size:11px;font-weight:800;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+  .ov-sec-sum{font-size:12.5px;line-height:1.55;color:#d6dffa;margin-bottom:6px}
+  .ov-sec .ov-bul{margin:0}
+  .ov-sec .ov-bul li{padding:5px 0 5px 20px;font-size:12px}
+  .ov-sec .ov-bul li::before{top:11px}
+  .ov-bul{list-style:none;margin:0 0 14px;padding:0}
+  .ov-bul li{position:relative;padding:7px 0 7px 22px;font-size:13px;line-height:1.55;color:#dcdcec;border-bottom:1px solid rgba(255,255,255,.05)}
+  .ov-bul li:last-child{border-bottom:0}
+  .ov-think{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut);padding:8px 0 4px}
+  .ov-think .sp{width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.15);
+    border-top-color:var(--accent2);animation:spin .8s linear infinite;flex:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .ov-bul li::before{content:"";position:absolute;left:4px;top:13px;width:7px;height:7px;border-radius:2px;
+    background:linear-gradient(135deg,var(--accent2),var(--accent));box-shadow:0 0 8px rgba(0,212,255,.5)}
+  .ov-q{display:flex;gap:10px;align-items:flex-start;background:rgba(0,0,0,.22);
+    border:1px solid var(--line);border-radius:13px;padding:11px 13px;margin-bottom:8px;
+    font-size:13.5px;line-height:1.5;animation:qin .45s ease both;transition:.2s}
+  .ov-q:active{transform:scale(.98)}
+  .ov-q .n{width:22px;height:22px;flex:none;border-radius:7px;display:grid;place-items:center;
+    font-size:12px;font-weight:800;background:linear-gradient(135deg,var(--accent3),var(--accent));color:#fff}
+
+  /* Live transcript */
+  .live{background:linear-gradient(135deg,var(--card),var(--card2));border:1px solid var(--line);
+    border-radius:18px;padding:15px 16px;margin-bottom:14px;min-height:64px;position:relative;overflow:hidden;display:none}
+  .live::before{content:"";position:absolute;inset:0;background:radial-gradient(60% 100% at 0% 0%,rgba(0,212,255,.12),transparent 60%);pointer-events:none}
+  .live .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent2);font-weight:800;margin-bottom:7px;display:flex;align-items:center;gap:6px}
+  .live .lbl .bd{width:7px;height:7px;border-radius:50%;background:var(--hot);animation:pl 1.4s infinite}
+  .live .txt{font-size:15px;line-height:1.55;min-height:22px;max-height:42vh;overflow-y:auto;scroll-behavior:smooth}
+  .live .txt::-webkit-scrollbar{display:none}
+  .live .interim{color:var(--mut);font-style:italic}
+  /* Speaker colors — bright, high-contrast against the dark cards */
+  .sp-0{color:#7ee0ff}.sp-1{color:#ffd166}.sp-2{color:#5effa0}
+  .sp-3{color:#ff9ecb}.sp-4{color:#c4a8ff}.sp-5{color:#ffb270}
+  [class^="sp-"]{transition:color .2s}
+  /* Recapped section: the transcript chunk that fed a recap, tinted by section */
+  .seg-sec{border:1px solid;border-radius:12px;padding:8px 11px;margin-bottom:9px}
+  .seg-sec.flash{animation:secflash .9s ease}
+  @keyframes secflash{0%{filter:brightness(1.9)}100%{filter:none}}
+  .seg-sec-tag{font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .seg-sec-tx{font-size:14px;line-height:1.55}
+  .seg-live{font-size:15px;line-height:1.55}
+  .cursor{display:inline-block;width:2px;height:16px;background:var(--accent2);margin-left:1px;vertical-align:middle;animation:bk 1s steps(2) infinite}
+  @keyframes bk{0%,50%{opacity:1}51%,100%{opacity:0}}
+
+  /* Cross-navigation pills: chapter card <-> its transcript block */
+  .jumpBtn{flex:none;border:1px solid currentColor;background:rgba(255,255,255,.06);border-radius:8px;
+    width:28px;height:28px;display:grid;place-items:center;cursor:pointer;opacity:.85;transition:.18s;margin-left:auto;position:relative}
+  .jumpBtn::after{content:"";position:absolute;inset:-8px}
+  .jumpBtn:hover{opacity:1;transform:scale(1.06)}
+  .jumpBtn:active{transform:scale(.92)}
+  .jumpBtn.sm{width:20px;height:20px;border-radius:6px;opacity:.8;flex:none;margin-left:8px}
+  .jumpBtn.sm svg{width:11px;height:11px}
+  .jumpBtn.sm::after{inset:-10px}
+
+  .empty{text-align:center;color:var(--mut);padding:54px 24px 30px;font-size:14px;line-height:1.7}
+  .empty .big-wrap{position:relative;display:inline-grid;place-items:center;margin-bottom:18px}
+  .empty .big-ring{position:absolute;width:88px;height:88px;border-radius:50%;border:1.5px solid rgba(124,160,255,.28)}
+  .empty .big-ring.r2{width:118px;height:118px;border-color:rgba(124,160,255,.16);animation:emptypulse 3.2s ease-out infinite}
+  .empty .big-ring.r1{animation:emptypulse 3.2s ease-out infinite .6s}
+  @keyframes emptypulse{0%{transform:scale(.82);opacity:.9}100%{transform:scale(1.22);opacity:0}}
+  .empty .big{font-size:42px;position:relative;z-index:1;filter:drop-shadow(0 6px 18px rgba(124,92,255,.5))}
+  .empty .feats{display:flex;justify-content:center;gap:8px;margin-top:20px;flex-wrap:wrap}
+  .empty .feat{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.04);border:1px solid var(--line);
+    border-radius:20px;padding:7px 13px;font-size:11px;font-weight:700;color:var(--accent3)}
+  .empty .feat svg{width:13px;height:13px;flex:none}
+
+  /* Chapter cards */
+  .chap{background:var(--card);border:1px solid var(--line);border-radius:18px;margin-bottom:12px;
+    overflow:hidden;animation:rise .5s cubic-bezier(.2,.8,.2,1) both;position:relative}
+  .chap::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+    background:linear-gradient(var(--secac,var(--accent)),var(--secac,var(--accent2)));opacity:.9}
+  @keyframes rise{from{opacity:0;transform:translateY(20px) scale(.98)}to{opacity:1;transform:none}}
+  .chap.flash{animation:secflash .9s ease}
+  .chap-hd{display:flex;align-items:center;gap:11px;padding:14px 15px;cursor:pointer;user-select:none;transition:background .15s}
+  .chap-hd:active{background:rgba(255,255,255,.03)}
+  .chap-num{width:32px;height:32px;flex:none;border-radius:10px;display:grid;place-items:center;
+    font-weight:800;font-size:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;
+    box-shadow:0 4px 12px rgba(124,92,255,.35)}
+  .chap-meta{flex:1;min-width:0}
+  .chap-title{font-size:14.5px;font-weight:700;line-height:1.3;letter-spacing:-.2px}
+  .chap-sub{font-size:11px;color:var(--mut);margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .chev{color:var(--mut);transition:transform .35s;display:grid;place-items:center;flex:none}
+  .chap.open .chev{transform:rotate(90deg)}
+
+  .chap-body{max-height:0;overflow:hidden;transition:max-height .5s cubic-bezier(.2,.8,.2,1)}
+  .chap.open .chap-body{max-height:1600px}
+  .chap-inner{padding:0 15px 15px}
+
+  .recap{background:rgba(124,92,255,.09);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;
+    padding:11px 13px;font-size:13px;line-height:1.6;color:#dedeef;margin-bottom:13px}
+
+  .qh{font-size:10px;text-transform:uppercase;letter-spacing:1.4px;color:var(--accent2);font-weight:800;margin-bottom:9px;display:flex;align-items:center;gap:6px}
+  .q{display:flex;gap:9px;align-items:flex-start;background:var(--card2);border:1px solid var(--line);
+    border-radius:12px;padding:10px 12px;margin-bottom:8px;font-size:13px;line-height:1.5;
+    animation:qin .4s ease both;transition:.2s}
+  .q:active{transform:scale(.98);background:var(--card3)}
+  @keyframes qin{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:none}}
+  .q .spark{color:var(--accent2);flex:none;font-size:14px}
+
+  details.tr{margin-top:10px}
+  details.tr summary{font-size:11px;color:var(--mut);cursor:pointer;list-style:none;font-weight:700}
+  details.tr summary::-webkit-details-marker{display:none}
+  details.tr p{font-size:12px;color:var(--mut);line-height:1.6;margin-top:8px}
+
+  /* Recap button (floating, above bar) */
+  .recapBtn{position:absolute;left:50%;bottom:calc(108px + env(safe-area-inset-bottom));transform:translateX(-50%);
+    display:flex;align-items:center;gap:8px;padding:11px 20px;border:0;border-radius:30px;cursor:pointer;
+    font-family:inherit;font-weight:800;font-size:13.5px;color:#fff;
+    background:linear-gradient(135deg,var(--accent3),var(--accent),var(--accent2));background-size:200% 200%;
+    box-shadow:0 10px 30px rgba(8,16,34,.55),0 8px 26px rgba(124,92,255,.5),0 0 0 5px rgba(8,16,34,.38);
+    transition:.25s;z-index:20;animation:gshift 5s ease infinite;opacity:0;pointer-events:none}
+  .recapBtn.show{opacity:1;pointer-events:auto}
+  .recapBtn:active{transform:translateX(-50%) scale(.95)}
+  @keyframes gshift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+  .recapBtn .em{font-size:15px}
+
+  /* Bottom bar */
+  .bar{position:absolute;left:0;right:0;bottom:0;padding:14px 18px calc(28px + env(safe-area-inset-bottom));
+    background:linear-gradient(0deg,var(--bg-b) 38%,rgba(47,116,189,0));display:flex;align-items:center;justify-content:center;gap:14px;z-index:15}
+  .credits{position:absolute;left:0;right:0;bottom:calc(6px + env(safe-area-inset-bottom));text-align:center;
+    font-size:9.5px;letter-spacing:.6px;font-weight:700;color:var(--txt);opacity:.5;pointer-events:none;z-index:16}
+
+  /* Recording level tiers — marginal → good → ideal-for-transcription.
+     Each tier carries a color + a soft glow; .rec, the ring meter and the
+     wave bars all read off the same --lvl-* variables so the whole control
+     shifts together as input quality changes. No text label — the color
+     alone (orange → yellow → green) tells the story. */
+  :root{
+    --lvl-q1:#ff9f43; --lvl-q1b:#ffbb70;   /* marginal */
+    --lvl-q2:#ffd166; --lvl-q2b:#ffe39a;   /* good */
+    --lvl-q3:#3ddc97; --lvl-q3b:#7af0bd;   /* perfect / transcription-ready */
+    --lvl-c:var(--lvl-q1); --lvl-cb:var(--lvl-q1b);  /* current tier, set by JS */
+  }
+  .rec-wrap{position:relative;display:grid;place-items:center}
+
+  .rec{position:relative;width:80px;height:80px;border-radius:50%;border:0;cursor:pointer;
+    background:linear-gradient(135deg,var(--hot),#ff7a5c);color:#fff;display:grid;place-items:center;
+    box-shadow:0 12px 34px rgba(255,77,109,.5);transition:background .35s,box-shadow .35s,transform .25s}
+  .rec:active{transform:scale(.93)}
+  .rec .ico{width:26px;height:26px;border-radius:7px;background:#fff;transition:.3s;position:relative;z-index:2}
+  .rec.live .ico{border-radius:5px;width:22px;height:22px}
+  .rec.live{background:linear-gradient(135deg,#161a2c,#222c4a);
+    box-shadow:0 0 0 2px var(--lvl-c) inset,0 12px 30px rgba(0,0,0,.4),0 0 22px -4px var(--lvl-c);
+    transition:box-shadow .35s}
+  .ring{position:absolute;inset:-6px;border-radius:50%;border:2px solid var(--lvl-c);opacity:0;transition:border-color .35s}
+  .rec.live .ring{animation:rg 1.6s ease-out infinite}
+  @keyframes rg{0%{transform:scale(.9);opacity:.7}100%{transform:scale(1.4);opacity:0}}
+
+  /* Circular level meter traced around the button rim. Track = full circle in
+     low opacity; fill = arc that grows with input level and recolors by tier. */
+  .lvl-ring{position:absolute;inset:-9px;width:calc(100% + 18px);height:calc(100% + 18px);
+    transform:rotate(-90deg);pointer-events:none;z-index:1;opacity:0;transition:opacity .3s}
+  .rec.live .lvl-ring{opacity:1}
+  .lvl-track{fill:none;stroke:rgba(255,255,255,.10);stroke-width:3.5}
+  .lvl-fill{fill:none;stroke:var(--lvl-c);stroke-width:3.5;stroke-linecap:round;
+    stroke-dasharray:270.4;stroke-dashoffset:270.4;
+    transition:stroke-dashoffset .12s linear,stroke .35s;
+    filter:drop-shadow(0 0 5px var(--lvl-cb))}
+
+  .wave{display:flex;align-items:center;gap:3px;height:42px;width:66px;justify-content:center;position:relative;z-index:2}
+  .wave i{width:3.5px;border-radius:3px;background:linear-gradient(var(--lvl-cb),var(--lvl-c));height:6px;transition:height .1s,background .35s}
+
+  .side{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:48px}
+  .side small{font-size:9.5px;color:var(--mut);font-weight:700}
+  .ghost{background:linear-gradient(160deg,var(--card2),var(--card));border:1px solid var(--line);color:var(--txt);width:50px;height:50px;
+    border-radius:16px;display:grid;place-items:center;cursor:pointer;transition:.2s;
+    box-shadow:0 4px 14px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.02) inset}
+  .ghost svg{opacity:.92}
+  .ghost:hover{border-color:rgba(124,160,255,.5);color:var(--accent2)}
+  .ghost:active{transform:scale(.9)}
+
+  .toast{position:absolute;left:50%;top:62px;transform:translateX(-50%) translateY(-20px);
+    background:var(--card2);border:1px solid var(--line);color:var(--txt);font-size:12.5px;
+    padding:9px 16px;border-radius:13px;opacity:0;transition:.35s;pointer-events:none;z-index:60;max-width:88%;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  .pill{font-size:9.5px;font-weight:800;padding:2px 8px;border-radius:20px;background:rgba(61,220,151,.16);color:var(--ok);letter-spacing:.5px}
+  .pill.new{background:rgba(255,209,102,.18);color:var(--gold)}
+
+  /* API key button + modal */
+  .keybtn{background:var(--card);border:1px solid var(--line);color:var(--mut);width:34px;height:34px;border-radius:11px;
+    display:grid;place-items:center;cursor:pointer;font-size:15px;transition:.2s;flex:none}
+  .keybtn:active{transform:scale(.92)}
+  .keybtn.on{color:var(--ok);border-color:rgba(61,220,151,.5);box-shadow:0 0 0 1px rgba(61,220,151,.3) inset}
+  .modal{position:fixed;inset:0;background:rgba(2,8,22,.72);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    display:none;align-items:center;justify-content:center;z-index:80;padding:22px}
+  .modal.show{display:flex}
+  .sheet{width:100%;max-width:420px;max-height:88vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    background:linear-gradient(135deg,var(--card),var(--card2));border:1px solid var(--line);
+    border-radius:20px;padding:18px 18px 16px;box-shadow:0 24px 60px rgba(0,0,0,.5);animation:rise .35s cubic-bezier(.2,.8,.2,1) both}
+  .sheet::-webkit-scrollbar{display:none}
+  .sheet h3{font-size:16px;font-weight:800;letter-spacing:-.2px;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+  .sheet .sub{font-size:12px;color:var(--mut);line-height:1.5;margin-bottom:13px}
+  .set-section{display:flex;align-items:center;gap:8px;margin:18px 0 11px;padding-top:14px;border-top:1px solid var(--line)}
+  .set-section:first-of-type{margin-top:6px;padding-top:0;border-top:0}
+  .set-section .ic{width:22px;height:22px;border-radius:7px;background:rgba(124,160,255,.14);color:var(--accent3);
+    display:grid;place-items:center;flex:none}
+  .set-section .ic svg{width:13px;height:13px}
+  .set-section .tt{font-size:11.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--txt);opacity:.78}
+  .keyrow{display:flex;gap:8px;margin-bottom:10px}
+  .keyrow input{flex:1;min-width:0;background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--txt);
+    border-radius:12px;padding:11px 12px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .keyrow input:focus{outline:none;border-color:var(--accent)}
+  .keyrow .eye{background:var(--card3);border:1px solid var(--line);color:var(--txt);border-radius:12px;width:44px;cursor:pointer;font-size:15px;flex:none}
+  .mbtns{display:flex;gap:8px;margin-top:4px}
+  .mbtn{flex:1;border:0;border-radius:12px;padding:12px;font-family:inherit;font-weight:800;font-size:13.5px;cursor:pointer;transition:.2s}
+  .mbtn:active{transform:scale(.97)}
+  .mbtn.save{color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .mbtn.ghostb{background:var(--card3);color:var(--txt);border:1px solid var(--line)}
+  .mbtn.danger{background:rgba(255,77,109,.16);color:var(--hot);border:1px solid rgba(255,77,109,.4)}
+  .mnote{font-size:10.5px;color:var(--mut);line-height:1.5;margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+  .mnote b{color:var(--gold)}
+  .mstatus{font-size:11.5px;font-weight:700;margin-bottom:11px}
+  .mstatus.ok{color:var(--ok)} .mstatus.off{color:var(--mut)}
+  .mlink{color:var(--accent2);text-decoration:none}
+
+  /* Ollama setup panel (shown when Ollama is selected as the provider) */
+  .ollama-block{background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:13px;padding:13px 14px;margin-top:10px}
+  .ollama-block .ob-title{font-size:11.5px;font-weight:800;letter-spacing:.4px;color:var(--accent2);margin-bottom:6px;display:flex;align-items:center;gap:7px}
+  .ollama-block .ob-title .dot{width:7px;height:7px;background:var(--accent2);animation:none}
+  .ollama-block .ob-sub{font-size:11px;color:var(--mut);line-height:1.55;margin-bottom:10px}
+  .ollama-block code{display:block;background:rgba(0,0,0,.45);border:1px solid var(--line);border-radius:8px;
+    padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#cfe3ff;
+    margin:5px 0;white-space:pre-wrap;word-break:break-word;user-select:all}
+  .ollama-block .ob-row{display:flex;gap:8px;align-items:center;margin:9px 0 4px}
+  .ollama-block .ob-row label{font-size:10.5px;color:var(--mut);font-weight:700;flex:none;width:62px}
+  .ollama-block .ob-row input{flex:1;min-width:0;background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--txt);
+    border-radius:9px;padding:8px 10px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .ollama-block .ob-row input:focus{outline:none;border-color:var(--accent)}
+  .ollama-block .ob-probe{margin-top:8px;width:100%;border:0;border-radius:10px;padding:9px;
+    font-family:inherit;font-weight:800;font-size:11.5px;cursor:pointer;color:#fff;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));transition:.18s}
+  .ollama-block .ob-probe:active{transform:scale(.98)}
+  .ollama-block .ob-probe.ok{background:linear-gradient(135deg,#1a8a5a,#3ddc97)}
+  .ollama-block .ob-probe.err{background:linear-gradient(135deg,#a13a4a,#ff4d6d)}
+
+  .keyrowbtn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;
+    background:var(--card3);border:1px solid var(--line);border-radius:13px;padding:13px 14px;
+    color:var(--txt);font-family:inherit;font-weight:700;font-size:13.5px;cursor:pointer;transition:.2s}
+  .keyrowbtn:active{transform:scale(.98)}
+  .keyrowbtn span:first-child{flex:none}
+  .mstatus-mini{font-size:10.5px;font-weight:800;padding:4px 9px;border-radius:20px;background:rgba(255,255,255,.06);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%}
+  .mstatus-mini.ok{color:var(--ok);background:rgba(61,220,151,.14)}
+  .mstatus-mini.off{color:var(--mut)}
+
+  /* Settings — segmented controls */
+  .set-group{margin-bottom:15px}
+  .set-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--accent2);font-weight:800;margin-bottom:8px}
+  .set-hint{text-transform:none;letter-spacing:0;color:var(--mut);font-weight:600;font-size:10px}
+  .seg{display:flex;gap:5px;background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:13px;padding:5px}
+  .seg button{flex:1;min-width:0;border:0;background:transparent;color:var(--mut);font-family:inherit;font-weight:800;font-size:13px;
+    padding:9px 4px;border-radius:9px;cursor:pointer;transition:.2s;display:flex;flex-direction:column;align-items:center;gap:2px;line-height:1.2}
+  .seg button span{font-size:8.5px;font-weight:600;opacity:.75;white-space:nowrap}
+  .seg button:active{transform:scale(.95)}
+  .seg button.on{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 14px rgba(79,140,255,.45)}
+  .seg button.on span{opacity:.92}
+
+  /* Context / History / Ask panels */
+  .ctx-area{width:100%;background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--txt);border-radius:12px;
+    padding:11px 12px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical;margin-bottom:10px}
+  .ctx-area:focus{outline:none;border-color:var(--accent)}
+  .ctx-files{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+  .ctx-file{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:12px}
+  .ctx-file .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ctx-file .sz{color:var(--mut);font-size:10px;flex:none}
+  .ctx-file .sz.parsing{color:var(--accent2);font-weight:700}
+  .ctx-file .sz.parsing::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:1.5px solid var(--accent2);border-top-color:transparent;animation:spin .7s linear infinite;margin-right:5px;vertical-align:-1px}
+  .ctx-file .sz.err{color:var(--hot);font-weight:700}
+  .ctx-file .rm{flex:none;cursor:pointer;color:var(--hot);font-weight:800;border:0;background:transparent;font-size:15px}
+  .hist-list{display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow-y:auto;margin-bottom:12px}
+  .hist-list::-webkit-scrollbar{display:none}
+  .hist-empty{color:var(--mut);font-size:12px;text-align:center;padding:18px 0}
+  .hist-item{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:13px;padding:11px 12px}
+  .hist-item .meta{flex:1;min-width:0}
+  .hist-item .ti{font-size:13.5px;font-weight:700;letter-spacing:-.2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hist-item .sub{font-size:10.5px;color:var(--mut);margin-top:2px}
+  .hist-item button{flex:none;border:0;border-radius:9px;padding:8px 11px;font-family:inherit;font-weight:800;font-size:11.5px;cursor:pointer;transition:.15s}
+  .hist-item button:active{transform:scale(.94)}
+  .hist-item .open{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+  .hist-item .del{background:rgba(255,77,109,.16);color:var(--hot);border:1px solid rgba(255,77,109,.4)}
+  .ask-log{display:flex;flex-direction:column;gap:10px;max-height:44vh;overflow-y:auto;margin-bottom:11px}
+  .ask-log::-webkit-scrollbar{display:none}
+  .ask-q{align-self:flex-end;max-width:88%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border-radius:14px 14px 4px 14px;padding:9px 12px;font-size:13px;line-height:1.45}
+  .ask-a{align-self:flex-start;max-width:92%;background:rgba(0,0,0,.24);border:1px solid var(--line);color:var(--txt);border-radius:14px 14px 14px 4px;padding:10px 12px;font-size:13px;line-height:1.55;white-space:pre-wrap}
+  .ask-a.think{color:var(--mut);font-style:italic}
+  .ask-hint{color:var(--mut);font-size:12px;text-align:center;padding:14px 0}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="hd">
+    <div class="brand">
+      <div class="logo">◎</div>
+      <div><h1 id="t-title">Smart reporter</h1><p id="t-tag">Live conversation intelligence</p></div>
+    </div>
+    <div class="toolbar">
+      <div class="keybtn" id="ctxBtn" title="Context">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M8 13h8M8 17h6"/></svg>
+      </div>
+      <div class="keybtn" id="askBtn" title="Ask the transcript">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5z"/><path d="M9.2 9.3a2.8 2.8 0 0 1 5.3 1c0 1.9-2.8 2.5-2.8 2.5"/><path d="M12 16.5h.01"/></svg>
+      </div>
+      <div class="keybtn" id="histBtn" title="Saved sessions">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v6h6"/><path d="M3.5 9a9 9 0 1 0 2.1-3.4L3 9"/><path d="M12 8v5l3 2"/></svg>
+      </div>
+      <div class="keybtn" id="clear" title="Reset">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5"/></svg>
+      </div>
+      <span class="hd-div"></span>
+      <div class="keybtn" id="setBtn" title="Settings">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
+      <div class="keybtn" id="keyBtn" title="Connect Claude (API key)">🔑</div>
+    </div>
+  </div>
+
+  <div class="status">
+    <span class="dot" id="dot"></span><span id="stat">Tap record to begin</span>
+    <span class="stat-words" id="wc"></span>
+  </div>
+
+  <div class="scroll" id="scroll">
+    <div class="overview" id="overview"></div>
+    <div class="live" id="liveCard">
+      <div class="lbl"><span class="bd"></span> Live transcript</div>
+      <div class="txt" id="liveTxt"><span class="cursor"></span></div>
+    </div>
+    <div id="chapters"></div>
+    <div class="empty" id="empty">
+      <div class="big-wrap"><span class="big-ring r1"></span><span class="big-ring r2"></span><div class="big">🎙️</div></div>
+      <div id="t-empty">Transcribe live, split into chapters, recap<br>and suggest smart questions as you go!</div>
+      <div class="feats">
+        <span class="feat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M8 13h8M8 17h6"/></svg><span id="t-featChap">Chapters</span></span>
+        <span class="feat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg><span id="t-featAI">AI recaps</span></span>
+        <span class="feat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.3 7.6L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5z"/></svg><span id="t-featAsk">Ask anything</span></span>
+      </div>
+    </div>
+  </div>
+
+  <button class="recapBtn" id="recapBtn"><span class="em">✨</span><span id="t-recapbtn">Recap so far</span></button>
+
+  <div class="bar">
+    <div class="side">
+      <div class="ghost" id="copy" title="Copy transcript">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+      </div>
+      <small id="t-copy">Copy</small>
+    </div>
+    <div class="rec-wrap">
+      <button class="rec" id="rec" aria-label="Record">
+        <svg class="lvl-ring" id="lvlRing" viewBox="0 0 96 96" aria-hidden="true">
+          <circle class="lvl-track" cx="48" cy="48" r="43"/>
+          <circle class="lvl-fill" id="lvlFill" cx="48" cy="48" r="43"/>
+        </svg>
+        <span class="ring"></span>
+        <span class="wave" id="wave" style="display:none"></span>
+        <span class="ico" id="ico"></span>
+      </button>
+    </div>
+    <div class="side">
+      <div class="ghost" id="export" title="Export Word">
+        <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="m8 11 4 4 4-4"/><path d="M5 21h14"/></svg>
+      </div>
+      <small id="t-export">Word</small>
+    </div>
+  </div>
+
+  <div class="credits">Credits: F. Peddis</div>
+</div>
+
+<div class="modal" id="keyModal">
+  <div class="sheet">
+    <h3>🔑 <span id="t-keyTitle">Connect an AI provider</span></h3>
+    <div class="seg" id="keyProviderTabs" style="margin-bottom:14px">
+      <button data-v="anthropic"><b>Claude</b><span>Anthropic</span></button>
+      <button data-v="glm"><b>GLM</b><span>Zhipu AI</span></button>
+      <button data-v="ollama"><b>Ollama</b><span>Local · Gemma</span></button>
+    </div>
+    <!-- API-key panel: shown for Anthropic and GLM only -->
+    <div id="keyApiKeyPanel">
+      <div class="sub" id="t-keySub">Paste your Anthropic API key to generate recaps and smart questions with Claude. It is stored only in this browser and sent only to Anthropic.</div>
+      <div class="mstatus off" id="keyStatus"></div>
+      <div class="keyrow">
+        <input id="keyInput" type="password" placeholder="sk-ant-..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <button class="eye" id="keyEye" title="Show / hide">👁</button>
+      </div>
+      <div class="mbtns">
+        <button class="mbtn save" id="keySave" data-t="save">Save</button>
+        <button class="mbtn danger" id="keyClear" data-t="clear">Remove</button>
+        <button class="mbtn ghostb" id="keyClose" data-t="close">Close</button>
+      </div>
+      <div class="mnote" id="t-keyNote"><b>Keep it private:</b> a key stored in a browser can be read by anyone using this device. Use a key limited to this purpose and remove it when finished. Get a key at <a class="mlink" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.</div>
+    </div>
+    <!-- Ollama panel: endpoint + model + run/shutdown instructions + connection test.
+         Shown only when the Ollama tab is active. -->
+    <div id="keyOllamaPanel" style="display:none">
+      <div class="sub" id="t-ollamaSub">Ollama runs locally on your machine — no API key needed.</div>
+      <div class="mstatus off" id="ollamaStatus"></div>
+      <div class="ollama-block">
+        <div class="ob-title"><span class="dot"></span><span id="t-ollamaSetupTitle">Run Ollama locally</span></div>
+        <div class="ob-sub" id="t-ollamaSetupSub">Ollama is a free, open-source model server. Start it once before using this provider.</div>
+        <div id="t-ollamaStep1">1) Install Ollama from ollama.com (macOS / Windows / Linux). On Linux you can also run:</div>
+        <code>curl -fsSL https://ollama.com/install.sh | sh</code>
+        <div id="t-ollamaStep2">2) Pull the Gemma model (first time only — downloads a few GB):</div>
+        <code>ollama pull gemma3</code>
+        <div id="t-ollamaStep3">3) Start the Ollama server (keeps running in the background):</div>
+        <code>ollama serve</code>
+        <div id="t-ollamaStep4">4) Set endpoint and model below, then test the connection.</div>
+        <div class="ob-row"><label id="t-ollamaEndpoint">Endpoint</label><input id="ollamaEndpointInput" type="text" placeholder="http://localhost:11434" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+        <div class="ob-row"><label id="t-ollamaModel">Model</label><input id="ollamaModelInput" type="text" placeholder="gemma3" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+        <button class="ob-probe" id="ollamaProbe" data-t="ollamaProbe">Test connection</button>
+        <div style="margin-top:12px;font-size:11px;font-weight:800;letter-spacing:.4px;color:var(--gold)" id="t-ollamaStopTitle">To shut it down later:</div>
+        <div style="font-size:11px;color:var(--mut);line-height:1.5;margin-top:3px" id="t-ollamaStopHint">On Windows / macOS: click the Ollama tray icon → Quit Ollama. On Linux: stop the service or kill the process.</div>
+        <div style="font-size:10px;color:var(--mut);margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">Linux stop: <span style="color:#cfe3ff;user-select:all">pkill ollama</span> &nbsp;or&nbsp; <span style="color:#cfe3ff;user-select:all">sudo systemctl stop ollama</span></div>
+      </div>
+      <div class="mbtns">
+        <button class="mbtn save" id="ollamaSave" data-t="save">Save</button>
+        <button class="mbtn ghostb" id="ollamaClose" data-t="close">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="setModal">
+  <div class="sheet">
+    <h3>⚙️ <span id="t-setTitle">Settings</span></h3>
+
+    <div class="set-section"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg></span><span class="tt" id="t-secLang">Languages</span></div>
+    <div class="set-group">
+      <div class="set-label" id="t-setSpeech">Spoken language <span class="set-hint" id="t-setSpeechHint">(transcription)</span></div>
+      <div class="seg" id="setSpeech">
+        <button data-v="en">English</button>
+        <button data-v="it">Italiano</button>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-label" id="t-setOut">Recap &amp; questions language</div>
+      <div class="seg" id="setOut">
+        <button data-v="en">English</button>
+        <button data-v="it">Italiano</button>
+      </div>
+    </div>
+
+    <div class="set-section"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M8 13h8M8 17h6"/></svg></span><span class="tt" id="t-secChap">Chapters &amp; recap</span></div>
+    <div class="set-group">
+      <div class="set-label" id="t-setSplit">Organize into chapters</div>
+      <div class="seg" id="setSplit">
+        <button data-v="1"><b id="t-spOn">On</b><span id="t-spOnS">Auto-split &amp; recap</span></button>
+        <button data-v="0"><b id="t-spOff">Off</b><span id="t-spOffS">One continuous stream</span></button>
+      </div>
+    </div>
+    <div class="set-group" id="chapLenGroup">
+      <div class="set-label" id="t-setChap">Typical chapter length <span class="set-hint" id="t-setChapHint">(words)</span></div>
+      <div class="seg" id="setChap">
+        <button data-v="100">100</button>
+        <button data-v="200">200</button>
+        <button data-v="300">300</button>
+        <button data-v="400">400</button>
+        <button data-v="500">500</button>
+        <button data-v="1000">1000</button>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-label" id="t-setVerb">Recap detail</div>
+      <div class="seg" id="setVerb">
+        <button data-v="short" data-t="vShort">Short</button>
+        <button data-v="medium" data-t="vMed">Medium</button>
+        <button data-v="long" data-t="vLong">Long</button>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-label" id="t-setNq">Smart questions <span class="set-hint" id="t-setNqHint">(per recap/chapter)</span></div>
+      <div class="seg" id="setNq">
+        <button data-v="0">0</button>
+        <button data-v="1">1</button>
+        <button data-v="2">2</button>
+        <button data-v="3">3</button>
+      </div>
+    </div>
+
+    <div class="set-section"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg></span><span class="tt" id="t-secAI">AI provider</span></div>
+    <div class="set-group">
+      <div class="set-label" id="t-setProvider">Provider</div>
+      <div class="seg" id="setProvider">
+        <button data-v="anthropic"><b>Claude</b><span id="t-pAnthropicS">Anthropic</span></button>
+        <button data-v="glm"><b>GLM</b><span id="t-pGlmS">Zhipu AI</span></button>
+        <button data-v="ollama"><b>Ollama</b><span id="t-pOllamaS">Local · Gemma</span></button>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-label" id="t-setModel">Model tier <span class="set-hint" id="t-setModelHint">(used when an API key is active)</span></div>
+      <div class="seg seg3" id="setModel">
+        <button data-v="fast"><b id="t-mFast">Fast</b><span id="t-mFastS">Haiku · cheapest</span></button>
+        <button data-v="balanced"><b id="t-mBal">Balanced</b><span id="t-mBalS">Sonnet</span></button>
+        <button data-v="advanced"><b id="t-mAdv">Advanced</b><span id="t-mAdvS">Opus · priciest</span></button>
+      </div>
+    </div>
+    <div class="set-group">
+      <button class="keyrowbtn" id="setKeyBtn">
+        <span id="t-setKeyLbl">Manage API key</span>
+        <span class="mstatus-mini" id="setKeyStatus"></span>
+      </button>
+    </div>
+    <div class="mbtns"><button class="mbtn ghostb" id="setClose" data-t="close">Close</button></div>
+  </div>
+</div>
+
+<div class="modal" id="resetModal">
+  <div class="sheet">
+    <h3>⚠️ <span id="t-resetTitle">Reset everything?</span></h3>
+    <div class="sub" id="t-resetMsg">This deletes the transcribed content, chapters and recap, and starts from scratch. This can't be undone.</div>
+    <div class="mbtns">
+      <button class="mbtn ghostb" id="resetCancel" data-t="cancel">Cancel</button>
+      <button class="mbtn danger" id="resetOk" data-t="resetConfirm">Delete &amp; start over</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="ctxModal">
+  <div class="sheet">
+    <h3>🧭 <span id="t-ctxTitle">Conversation context</span></h3>
+    <div class="sub" id="t-ctxSub">Describe the goal of the conversation and attach documents to discuss. This is added to the start of the prompt to guide recaps and questions.</div>
+    <textarea id="ctxObjective" class="ctx-area" rows="4" placeholder="Objective / agenda…"></textarea>
+    <div class="ctx-files" id="ctxFiles"></div>
+    <div class="mbtns">
+      <button class="mbtn ghostb" id="ctxAttach" data-t="attach">Attach files</button>
+      <button class="mbtn save" id="ctxSave" data-t="save">Save</button>
+      <button class="mbtn ghostb" id="ctxClose" data-t="close">Close</button>
+    </div>
+    <input type="file" id="ctxFileInput" multiple accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.htm,.html,.xml,.yaml,.yml,.rtf,.srt,.vtt,.tex,.ini,.conf,.js,.ts,.py,.css,.pdf,.docx,.pptx,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation" style="display:none">
+    <div class="mnote" id="t-ctxNote">PDF, Word (.docx) and PowerPoint (.pptx) files are parsed in the browser and their text is added to the prompt — together with .txt/.md/.csv/.json/.html. Content is available for recaps and questions as soon as you save, even before transcribing.</div>
+  </div>
+</div>
+
+<div class="modal" id="histModal">
+  <div class="sheet">
+    <h3>🗂️ <span id="t-histTitle">Saved sessions</span></h3>
+    <div class="keyrow">
+      <input id="histName" type="text" placeholder="Session title…" autocomplete="off">
+      <button class="eye" id="histSave" title="Save current">💾</button>
+    </div>
+    <div class="hist-list" id="histList"></div>
+    <div class="mbtns"><button class="mbtn ghostb" id="histClose" data-t="close">Close</button></div>
+  </div>
+</div>
+
+<div class="modal" id="askModal">
+  <div class="sheet">
+    <h3>💬 <span id="t-askTitle">Ask the transcript</span></h3>
+    <div class="sub" id="t-askSub">Ask anything about what was said. Answers use the transcript and your context via Claude.</div>
+    <div class="ask-log" id="askLog"></div>
+    <div class="keyrow">
+      <input id="askInput" type="text" placeholder="Ask a question…" autocomplete="off">
+      <button class="eye" id="askSend" title="Send">➤</button>
+    </div>
+    <div class="mbtns"><button class="mbtn ghostb" id="askClose" data-t="close">Close</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================
+   LLM — recaps & smart questions powered by Claude.
+
+   Two ways to connect, tried in this order:
+   1) Your own Anthropic API key, pasted INTO THE APP (never typed in
+      chat). It's kept only in this browser's localStorage and sent
+      only to api.anthropic.com — never to any other server.
+   2) The Claude artifact runtime (window.claude.complete), available
+      when this file runs inside the Claude environment.
+   If neither is available, the on-device heuristic engine takes over
+   so the app still works end-to-end.
+
+   SECURITY NOTE: a key stored in the browser is readable by anyone with
+   access to this device/browser. Use a key scoped/limited to this use,
+   and clear it when done. For multi-user or production use, proxy the
+   call through your own backend instead of shipping the key to the browser.
+   ============================================================ */
+const KEY_STORE={anthropic:"cc_anthropic_key", glm:"cc_glm_key"};
+/* Ollama doesn't need an API key — it runs locally — but we still let the user
+   configure its endpoint URL (default http://localhost:11434) and the model
+   name to pull (default "gemma3"). Both are persisted separately. */
+const OLLAMA_ENDPOINT_STORE="cc_ollama_endpoint";
+const OLLAMA_MODEL_STORE="cc_ollama_model";
+const DEFAULT_OLLAMA_ENDPOINT="http://localhost:11434";
+const DEFAULT_OLLAMA_MODEL="gemma3";
+function getOllamaEndpoint(){ try{ return localStorage.getItem(OLLAMA_ENDPOINT_STORE)||DEFAULT_OLLAMA_ENDPOINT; }catch(e){ return DEFAULT_OLLAMA_ENDPOINT; } }
+function setOllamaEndpoint(v){ try{ const s=(v||"").trim()||DEFAULT_OLLAMA_ENDPOINT; localStorage.setItem(OLLAMA_ENDPOINT_STORE,s); }catch(e){} }
+function getOllamaModel(){ try{ return localStorage.getItem(OLLAMA_MODEL_STORE)||DEFAULT_OLLAMA_MODEL; }catch(e){ return DEFAULT_OLLAMA_MODEL; } }
+function setOllamaModel(v){ try{ const s=(v||"").trim()||DEFAULT_OLLAMA_MODEL; localStorage.setItem(OLLAMA_MODEL_STORE,s); }catch(e){} }
+function getApiKey(provider){ try{ const p=provider||settings.provider; if(p==="ollama")return ""; return localStorage.getItem(KEY_STORE[p])||""; }catch(e){ return ""; } }
+function setApiKey(k,provider){ try{ const p=provider||settings.provider; if(p==="ollama")return; const s=KEY_STORE[p]; k?localStorage.setItem(s,k):localStorage.removeItem(s); }catch(e){} }
+function keyLooksValid(k,provider){
+  const p=provider||settings.provider;
+  if(p==="ollama")return true;                       // local server — no key required
+  if(p==="anthropic")return /^sk-/.test(k||"");
+  return (k||"").trim().length>=8;                   // GLM etc.
+}
+
+/* ---------- User settings (model / recap detail / #questions / chapter length / languages) ---------- */
+/* Three providers, each with three cost/quality tiers. The tier concept (Fast /
+   Balanced / Advanced) is shared in the UI; only the underlying model id and
+   the API key/endpoint differ by provider. For Ollama the three tiers map to
+   small / medium / large Gemma variants so the user can pick a size that fits
+   their hardware. */
+const MODELS={
+  anthropic:{ fast:"claude-haiku-4-5-20251001", balanced:"claude-sonnet-4-6", advanced:"claude-opus-4-8" },
+  glm:      { fast:"glm-4.5-air",               balanced:"glm-4.6",          advanced:"glm-5.1" },
+  ollama:   { fast:"gemma3:1b",                 balanced:"gemma3",           advanced:"gemma3:12b" }
+};
+const PROVIDERS=["anthropic","glm","ollama"];
+const TIERS=["fast","balanced","advanced"];
+/* The "balanced" tier for Ollama follows the user-configured model name
+   (default gemma3) so users can switch to e.g. "gemma2", "gemma3:4b" etc. via
+   the Settings panel without editing tiers. The fast/advanced tiers stay as
+   sensible small/large defaults. */
+function ollamaTierModel(tier){
+  if(tier==="fast")return MODELS.ollama.fast;
+  if(tier==="advanced")return MODELS.ollama.advanced;
+  return getOllamaModel()||DEFAULT_OLLAMA_MODEL;
+}
+/* Recap-detail presets drive both the Claude prompts and the on-device fallback. */
+const VERB={
+  short: {recapPhrase:"1 short sentence", ovPhrase:"1 short sentence", secPhrase:"a brief phrase", qPhrase:"short and direct (max ~10 words each)", recapLen:90,  ovLen:110, secLen:90,  sents:1, pts:3},
+  medium:{recapPhrase:"1-2 sentences",    ovPhrase:"2 sentences",      secPhrase:"1 concise sentence", qPhrase:"concise",                        recapLen:150, ovLen:170, secLen:130, sents:2, pts:4},
+  long:  {recapPhrase:"3-4 sentences",    ovPhrase:"4-5 sentences",    secPhrase:"2-3 sentences",      qPhrase:"detailed and probing",            recapLen:320, ovLen:360, secLen:270, sents:4, pts:5}
+};
+const SET_STORE={model:"cc_model",provider:"cc_provider",verb:"cc_verb",chap:"cc_chaplen",speech:"cc_speech",out:"cc_out",nq:"cc_nq",split:"cc_split"};
+const CHAP_OPTS=[100,200,300,400,500,1000];
+const NQ_OPTS=[0,1,2,3];
+const OLD_MODEL_MAP={haiku:"fast",sonnet:"balanced",opus:"advanced"};  // migrate pre-multi-provider values
+let settings={provider:"anthropic",model:"fast",verb:"short",chap:100,speech:"en",out:"en",nq:3,split:true};
+function loadSettings(){
+  try{
+    const p=localStorage.getItem(SET_STORE.provider); if(PROVIDERS.includes(p))settings.provider=p;
+    let m=localStorage.getItem(SET_STORE.model); if(m&&OLD_MODEL_MAP[m])m=OLD_MODEL_MAP[m];
+    if(m&&TIERS.includes(m))settings.model=m;
+    const v=localStorage.getItem(SET_STORE.verb); if(v&&VERB[v])settings.verb=v;
+    const c=parseInt(localStorage.getItem(SET_STORE.chap),10); if(CHAP_OPTS.includes(c))settings.chap=c;
+    const s=localStorage.getItem(SET_STORE.speech); if(s==="en"||s==="it")settings.speech=s;
+    const o=localStorage.getItem(SET_STORE.out); if(o==="en"||o==="it")settings.out=o;
+    const n=parseInt(localStorage.getItem(SET_STORE.nq),10); if(NQ_OPTS.includes(n))settings.nq=n;
+    const sp=localStorage.getItem(SET_STORE.split); if(sp==="0"||sp==="1")settings.split=(sp==="1");
+  }catch(e){}
+  uiLang=settings.out;
+  applyChapterLen(settings.chap);
+}
+function saveSetting(k,v){ try{localStorage.setItem(SET_STORE[k],k==="split"?(v?"1":"0"):v);}catch(e){} settings[k]=v; if(k==="chap")applyChapterLen(v); }
+function verb(){ return VERB[settings.verb]||VERB.short; }
+
+/* ---------- Conversation context (objective + attached documents) ---------- */
+const CTX_STORE="cc_context";
+let context={objective:"",files:[]};   // files: {name, text}
+function loadContext(){ try{const c=JSON.parse(localStorage.getItem(CTX_STORE)); if(c&&typeof c==="object"){context.objective=c.objective||"";context.files=Array.isArray(c.files)?c.files:[];}}catch(e){} }
+function saveContext(){ try{localStorage.setItem(CTX_STORE,JSON.stringify(context));}catch(e){} }
+function hasContext(){ return !!((context.objective&&context.objective.trim())||(context.files&&context.files.length)); }
+function contextBlock(){
+  const parts=[];
+  if(context.objective&&context.objective.trim())parts.push("Objective: "+context.objective.trim());
+  (context.files||[]).forEach(f=>parts.push(f.text?`Document "${f.name}":\n${f.text}`:`Attached file (not parsed): ${f.name}`));
+  let out=parts.join("\n\n").trim();
+  if(out.length>24000)out=out.slice(0,24000)+"…";
+  return out;
+}
+
+/* ---------- Document text extraction (PDF / Word / PowerPoint / text) ----------
+   All parsing happens in the browser — no file ever leaves the device.
+   - PDF → pdf.js (Mozilla), reads every page's text items.
+   - .docx → mammoth.js, converts to plain text.
+   - .pptx → JSZip + minimal XML scraping of ppt/slides/slideN.xml (pulls text
+            out of <a:t> runs, which is where PowerPoint stores visible text).
+   - Older binary .doc/.ppt are NOT supported by these libs — they attach by
+     name only and the user is invited to paste the relevant text manually. */
+const TEXTY_EXT=/\.(txt|md|markdown|mdown|csv|tsv|json|jsonl|log|html?|xml|yaml|yml|rtf|srt|vtt|tex|ini|conf|js|ts|py|css)$/i;
+const PDF_EXT=/\.pdf$/i;
+const DOCX_EXT=/\.docx$/i;
+const PPTX_EXT=/\.pptx$/i;
+
+/* Truncate per-document text so a single huge PDF can't blow the localStorage
+   budget or the LLM context window. 20k chars ≈ 3-4k tokens, plenty for
+   grounding recaps and questions. */
+const MAX_DOC_CHARS=20000;
+
+async function extractTextFromPdf(file){
+  if(!window.pdfjsLib)throw new Error("PDF library not loaded yet — try again in a moment.");
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const parts=[];
+  const maxPages=Math.min(pdf.numPages, 60);   // safety cap
+  for(let i=1;i<=maxPages;i++){
+    const page=await pdf.getPage(i);
+    const content=await page.getTextContent();
+    const text=content.items.map(it=>it.str||"").join(" ").replace(/\s+/g," ").trim();
+    if(text)parts.push(text);
+  }
+  return parts.join("\n\n");
+}
+async function extractTextFromDocx(file){
+  if(!window.mammoth)throw new Error("Word library not loaded yet — try again in a moment.");
+  const buf=await file.arrayBuffer();
+  const result=await window.mammoth.extractRawText({arrayBuffer:buf});
+  return (result&&result.value?result.value:"").replace(/\r/g,"").replace(/\n{3,}/g,"\n\n").trim();
+}
+async function extractTextFromPptx(file){
+  if(!window.JSZip)throw new Error("PowerPoint library not loaded yet — try again in a moment.");
+  const buf=await file.arrayBuffer();
+  const zip=await window.JSZip.loadAsync(buf);
+  // Slide text lives in ppt/slides/slide1.xml ... slideN.xml. Sort numerically.
+  const slideNames=Object.keys(zip.files)
+    .filter(n=>/^ppt\/slides\/slide\d+\.xml$/i.test(n))
+    .sort((a,b)=>{const na=parseInt(a.match(/slide(\d+)\.xml/)[1],10),nb=parseInt(b.match(/slide(\d+)\.xml/)[1],10);return na-nb;});
+  const parts=[];
+  for(const name of slideNames){
+    const xml=await zip.files[name].async("string");
+    // Every visible text run is wrapped in <a:t>…</a:t>. Join runs with a
+    // space, separate paragraphs/blocks with newlines.
+    const runs=[...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(m=>m[1]);
+    const decoded=runs.map(r=>r.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'"));
+    const slideText=decoded.join(" ").replace(/\s+/g," ").trim();
+    if(slideText)parts.push("Slide: "+slideText);
+  }
+  return parts.join("\n\n");
+}
+
+/* Dispatch a file to the right parser based on extension. Returns {text, parseError}.
+   - parseError is null on success or a short human message (also non-fatal: the
+     file still attaches by name so the user knows something was added). */
+async function extractFileText(file){
+  const name=file.name||"";
+  try{
+    if(PDF_EXT.test(name))return {text:(await extractTextFromPdf(file)).slice(0,MAX_DOC_CHARS), parseError:null, kind:"pdf"};
+    if(DOCX_EXT.test(name))return {text:(await extractTextFromDocx(file)).slice(0,MAX_DOC_CHARS), parseError:null, kind:"docx"};
+    if(PPTX_EXT.test(name))return {text:(await extractTextFromPptx(file)).slice(0,MAX_DOC_CHARS), parseError:null, kind:"pptx"};
+    if(TEXTY_EXT.test(name)||/^text\//.test(file.type)||/json|xml|csv/.test(file.type)){
+      const t=await file.text();
+      return {text:t.slice(0,MAX_DOC_CHARS), parseError:null, kind:"text"};
+    }
+  }catch(err){
+    return {text:"", parseError:(err&&err.message)||"parse failed", kind:"unknown"};
+  }
+  return {text:"", parseError:null, kind:"unsupported"};
+}
+
+const LLM = {
+  get model(){
+    const p=settings.provider;
+    if(p==="ollama")return ollamaTierModel(settings.model);
+    return (MODELS[p]||MODELS.anthropic)[settings.model]||MODELS.anthropic.balanced;
+  },
+  get hasKey(){
+    // Ollama has no key — it's "ready" as long as an endpoint is set (always true).
+    return keyLooksValid(getApiKey(), settings.provider);
+  },
+  get hasArtifact(){ return settings.provider==="anthropic" && typeof window!=="undefined" && window.claude && typeof window.claude.complete==="function"; },
+  get enabled(){ return this.hasKey || this.hasArtifact; },
+
+  // Low-level: send system+user, return raw text (or null if no LLM available).
+  async _raw(system, user, maxTokens){
+    if(settings.provider==="ollama" && this.hasKey){
+      // Ollama local chat API: POST {endpoint}/api/chat with a messages array.
+      // Runs on the user's machine; no auth header. The "stream:false" flag
+      // makes the call return a single JSON object instead of NDJSON chunks.
+      const ep=getOllamaEndpoint().replace(/\/+$/,"");
+      const resp=await fetch(ep+"/api/chat",{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({
+          model:this.model,
+          stream:false,
+          messages:[{role:"system",content:system},{role:"user",content:user}],
+          options:{ num_predict: maxTokens||800 }
+        })
+      });
+      if(!resp.ok)throw new Error("Ollama API "+resp.status+" "+(await resp.text().catch(()=>"")));
+      const data=await resp.json();
+      return (data && data.message && data.message.content) || "";
+    }
+    if(this.hasKey){
+      if(settings.provider==="glm"){
+        const resp=await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions",{
+          method:"POST",
+          headers:{"content-type":"application/json","Authorization":"Bearer "+getApiKey()},
+          body:JSON.stringify({model:this.model,max_tokens:maxTokens||800,messages:[{role:"system",content:system},{role:"user",content:user}]})
+        });
+        if(!resp.ok)throw new Error("API "+resp.status+" "+(await resp.text().catch(()=>"")));
+        const data=await resp.json();
+        return ((data.choices||[])[0]||{}).message?.content||"";
+      }
+      const resp=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"content-type":"application/json","x-api-key":getApiKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:this.model,max_tokens:maxTokens||800,system,messages:[{role:"user",content:user}]})
+      });
+      if(!resp.ok)throw new Error("API "+resp.status+" "+(await resp.text().catch(()=>"")));
+      const data=await resp.json();
+      return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    }
+    if(this.hasArtifact)return await window.claude.complete(system+"\n\n"+user);
+    return null;
+  },
+  async call(text, lang, mode){
+    const {system,user}=buildPrompt(text,lang,mode);
+    const raw=await this._raw(system, user+"\n\nReturn ONLY the JSON object described above. No prose, no markdown, no backticks.", mode==="overview"?1600:700);
+    return parseJson(raw);
+  },
+  // Free-text answer to a user question about the transcript.
+  async ask(question){
+    const L=settings.out==="it"?"Italian":"English";
+    const ctx=contextBlock(), transcript=fullTranscript();
+    const system=`You answer the user's questions using BOTH the provided background context (the objective and any attached documents) AND the conversation transcript. Always consider both sources. The transcript may be empty if the conversation hasn't started yet — in that case rely on the context. If the answer is in neither, say you can't find it. Be concise and concrete. Answer in ${L}.`;
+    const user=`Background context:\n"""${ctx||"(none provided)"}"""\n\nTranscript so far:\n"""${transcript||"(empty — nothing transcribed yet)"}"""\n\nQuestion: ${question}`;
+    return await this._raw(system, user, 800);
+  }
+};
+
+/* Prompt engineering — recap-detail + question-count + context aware */
+function buildPrompt(text, lang, mode){
+  const L = lang==="it" ? "Italian" : "English";
+  const langRule = `Write ALL output text in ${L}, regardless of the transcript's language.`;
+  const v=verb(), nq=settings.nq, ctx=contextBlock();
+  const ctxSys = ctx?`Use the user's background context to interpret the conversation and tailor the recap and questions. `:"";
+  const ctxUser = ctx?`Background context (objective and/or documents to discuss):\n"""${ctx}"""\n\n`:"";
+  const qPart = nq>0
+    ? `, "questions": [exactly ${nq} sharp non-generic ${mode==="chapter"?"follow-up":"forward-looking"} question(s), ${v.qPhrase}, ${mode==="chapter"?"referencing concrete details from this segment":"specific to the actual content"}; no yes/no, no filler]`
+    : "";
+  if(mode==="chapter"){
+    return {
+      system:`You analyze a short segment of a live conversation transcript (one topic/chapter). ${langRule} ${ctxSys}`+
+        `The text is auto-generated speech-to-text and may have errors — infer intent. `+
+        `Respond with ONLY a JSON object, no markdown or backticks. Schema: `+
+        `{"title": 3-6 word specific title, "recap": ${v.recapPhrase} capturing the key point or decision${qPart}}`,
+      user:`${ctxUser}Transcript segment:\n"""${text}"""`
+    };
+  }
+  return {
+    system:`You produce a structured recap of the ENTIRE conversation, from the very beginning to now, organized into coherent thematic sections in chronological order. ${langRule} ${ctxSys}`+
+      `The text is auto-generated speech-to-text and may have errors — infer intent. `+
+      `Treat the transcript as one continuous text; do NOT attribute statements to specific speakers (speaker separation is unreliable). `+
+      `Be concrete: capture key decisions, facts, action items and open questions. Avoid generic phrasing and topic labels. `+
+      `Split the conversation into 2-6 coherent sections, each covering a distinct topic or phase. `+
+      `Respond with ONLY a JSON object, no markdown or backticks. Schema: `+
+      `{"recap": ${v.ovPhrase} overview of the whole conversation, `+
+      `"sections": [{"title": 3-6 word specific section heading, "summary": ${v.secPhrase} capturing the essence of this part, "points": [2-${v.pts} short, information-dense bullet points]}]${qPart}}`,
+    user:`${ctxUser}Full conversation transcript:\n"""${text}"""`
+  };
+}
+function parseJson(s){
+  if(!s)return null;
+  let t=s.trim().replace(/^```(?:json)?/i,"").replace(/```$/,"").trim();
+  try{return JSON.parse(t);}catch(e){}
+  const m=t.match(/\{[\s\S]*\}/);
+  if(m){try{return JSON.parse(m[0]);}catch(e){}}
+  return null;
+}
+
+/* ---------- i18n ---------- */
+const I18N={
+  en:{tag:"Live conversation intelligence",empty:"Transcribe live, split into chapters, recap<br>and suggest smart questions as you go!",
+    reset:"Reset",export:"Word",copy:"Copy",listening:"Listening…",ready:"Tap record to begin",stopped:"Stopped",
+    chapter:"Chapter",questions:"Smart questions",transcript:"Show transcript",recapbtn:"Recap so far",
+    ovTitle:"Recap so far",topq:"Top 3 questions",keypoints:"Key points",
+    bysection:"Recap by section",fulltranscript:"Full transcript",speaker:"Speaker",
+    noSupport:"Speech recognition isn't supported here. Use Safari on iPhone or Chrome.",
+    mic:"Mic blocked. Allow microphone access in Settings → Safari.",cleared:"Cleared",exported:"Exported",
+    autoStart:"Auto-detecting language…",words:"words",qCopied:"Question copied",noContent:"Keep talking — not enough yet for a recap.",
+    updated:"Recap updated",thinking:"Analyzing the full conversation…",
+    transcriptCopied:"Transcript copied to clipboard",nothingYet:"Nothing to copy yet",
+    keyTitle:"Connect an AI provider",
+    keySubAnthropic:"Paste your Anthropic API key to generate recaps and smart questions with Claude. It is stored only in this browser and sent only to Anthropic.",
+    keySubGlm:"Paste your GLM (Zhipu AI) API key to generate recaps and smart questions with GLM. It is stored only in this browser and sent only to Zhipu AI.",
+    keySubOllama:"Ollama runs locally on your machine — no API key needed. Start the server (see instructions below), set the endpoint and model name, then test the connection.",
+    keyNoteAnthropic:"<b>Keep it private:</b> a key stored in a browser can be read by anyone using this device. Use a key limited to this purpose and remove it when finished. Get a key at <a class='mlink' href='{link}' target='_blank' rel='noopener'>{linkLabel}</a>.",
+    keyNoteGlm:"<b>Keep it private:</b> a key stored in a browser can be read by anyone using this device. Use a key limited to this purpose and remove it when finished. Get a key at <a class='mlink' href='{link}' target='_blank' rel='noopener'>{linkLabel}</a>.",
+    save:"Save",clear:"Remove",close:"Close",connected:"● Connected",artifactOn:"● Connected via Claude app",notConnected:"○ Not connected — using on-device fallback",
+    ollamaConnected:"● Ollama reachable",ollamaNotConnected:"○ Ollama not reachable — start the server first",
+    keyMiniOn:"● Connected",keyMiniOff:"○ Not connected",
+    keySaved:"Key saved",keyRemoved:"Key removed",keyBad:"That doesn't look like a valid key for this provider",
+    setTitle:"Settings",setProvider:"Provider",setModel:"Model tier",setModelHint:"(used when an API key is active)",setKeyLbl:"Manage API key",
+    mFast:"Fast",mFastS:"Haiku · cheapest",mBal:"Balanced",mBalS:"Sonnet",mAdv:"Advanced",mAdvS:"Opus · priciest",
+    mFastSGlm:"GLM-4.5-Air · cheapest",mBalSGlm:"GLM-4.6",mAdvSGlm:"GLM-5.1 · priciest",
+    mFastSOllama:"Gemma3 1B · smallest",mBalSOllama:"Gemma3 (configured)",mAdvSOllama:"Gemma3 12B · largest",
+    setVerb:"Recap & questions detail",vShort:"Short",vMed:"Medium",vLong:"Long",
+    setChap:"Typical chapter length",setChapHint:"(words)",saved:"Settings saved",
+    setSpeech:"Spoken language",setSpeechHint:"(transcription)",setOut:"Recap & questions language",
+    setSplit:"Organize into chapters",spOn:"On",spOnS:"Auto-split & recap",spOff:"Off",spOffS:"One continuous stream",
+    jumpToTranscript:"Jump to transcript",jumpToRecap:"Jump to recap",
+    featChap:"Chapters",featAI:"AI recaps",featAsk:"Ask anything",
+    secLang:"Languages",secChap:"Chapters & recap",secAI:"AI provider",
+    resetTitle:"Reset everything?",resetMsg:"This deletes the transcribed content, chapters and recap, and starts from scratch. This can't be undone.",
+    resetConfirm:"Delete & start over",cancel:"Cancel",
+    actCopy:"Copy",actShare:"Forward",actTxt:".txt",recapCopied:"Recap copied",recapShared:"Shared",recapSaved:"Recap saved (.txt)",
+    setVerbLbl:"Recap detail",setNq:"Smart questions",setNqHint:"(per recap/chapter)",
+    ctxTitle:"Conversation context",ctxSub:"Describe the goal of the conversation and attach documents to discuss. This is added to the start of the prompt to guide recaps and questions.",
+    ctxNote:"PDF, Word (.docx) and PowerPoint (.pptx) files are parsed in the browser and their text is added to the prompt — together with .txt/.md/.csv/.json/.html. Content is available for recaps and questions as soon as you save, even before transcribing.",
+    attach:"Attach files",ctxSaved:"Context saved",ctxOn:"● Context set",
+    ctxAttached:"{n} file(s) attached",ctxParseFailed:"Couldn't parse {n} file(s) — attached by name only",
+    ollamaSetupTitle:"Run Ollama locally",
+    ollamaSetupSub:"Ollama is a free, open-source model server that runs on your machine. Start it once before using this provider. Recommended model: gemma3 (Google Gemma 3).",
+    ollamaStep1:"1) Install Ollama from ollama.com (macOS / Windows / Linux). On Linux you can also run:",
+    ollamaStep2:"2) Pull the Gemma model (first time only — downloads a few GB):",
+    ollamaStep3:"3) Start the Ollama server (keeps running in the background):",
+    ollamaStep4:"4) Come back here, set the endpoint (default http://localhost:11434) and model name, then tap Test connection.",
+    ollamaStopTitle:"To shut it down later:",
+    ollamaStopHint:"On Windows / macOS: click the Ollama tray icon → Quit Ollama.",
+    ollamaEndpoint:"Endpoint",ollamaModel:"Model",
+    ollamaProbe:"Test connection",ollamaProbeOk:"Ollama reachable ✓",ollamaProbeErr:"Ollama not reachable — is the server running?",
+    ollamaProbeChecking:"Checking…",
+    histTitle:"Saved sessions",noSessions:"No saved sessions yet.",sessionSaved:"Session saved",sessionDeleted:"Session deleted",sessionLoaded:"Session loaded",confirmDelete:"Delete this session?",
+    open:"Open",del:"Delete",untitled:"Untitled session",
+    askTitle:"Ask the transcript",askSub:"Ask anything about what was said. Answers use the transcript and your context — you can also ask questions about the attached documents even before transcribing.",
+    askThinking:"Thinking…",askNoLLM:"Connect an AI provider (key 🔑) to ask questions.",askEmptyTr:"Nothing transcribed yet.",askNothing:"Add context or transcribe something first.",
+  },
+
+  it:{tag:"Intelligenza per conversazioni dal vivo",empty:"Trascrivi dal vivo, dividi in capitoli, riepiloga<br>e proponi domande intelligenti mentre parli!",
+    reset:"Reset",export:"Word",copy:"Copia",listening:"In ascolto…",ready:"Tocca per registrare",stopped:"Fermato",
+    chapter:"Capitolo",questions:"Domande intelligenti",transcript:"Mostra trascrizione",recapbtn:"Riepilogo finora",
+    ovTitle:"Riepilogo finora",topq:"3 domande chiave",keypoints:"Punti chiave",
+    bysection:"Riepilogo per sezioni",fulltranscript:"Trascrizione completa",speaker:"Interlocutore",
+    noSupport:"Riconoscimento vocale non supportato. Usa Safari su iPhone o Chrome.",
+    mic:"Microfono bloccato. Consenti l'accesso in Impostazioni → Safari.",cleared:"Cancellato",exported:"Esportato",
+    autoStart:"Rilevamento lingua…",words:"parole",qCopied:"Domanda copiata",noContent:"Continua a parlare — non c'è ancora abbastanza per un riepilogo.",
+    updated:"Riepilogo aggiornato",thinking:"Analisi dell'intera conversazione…",
+    transcriptCopied:"Trascrizione copiata",nothingYet:"Niente da copiare ancora",
+    keyTitle:"Connetti un provider AI",
+    keySubAnthropic:"Incolla la tua chiave API Anthropic per generare riepiloghi e domande intelligenti con Claude. È salvata solo in questo browser e inviata solo ad Anthropic.",
+    keySubGlm:"Incolla la tua chiave API GLM (Zhipu AI) per generare riepiloghi e domande intelligenti con GLM. È salvata solo in questo browser e inviata solo a Zhipu AI.",
+    keySubOllama:"Ollama gira in locale sul tuo computer — niente chiave API. Avvia il server (vedi istruzioni sotto), imposta endpoint e nome modello, poi prova la connessione.",
+    keyNoteAnthropic:"<b>Tienila privata:</b> una chiave salvata nel browser può essere letta da chi usa questo dispositivo. Usa una chiave limitata a questo scopo e rimuovila al termine. Ottieni una chiave su <a class='mlink' href='{link}' target='_blank' rel='noopener'>{linkLabel}</a>.",
+    keyNoteGlm:"<b>Tienila privata:</b> una chiave salvata nel browser può essere letta da chi usa questo dispositivo. Usa una chiave limitata a questo scopo e rimuovila al termine. Ottieni una chiave su <a class='mlink' href='{link}' target='_blank' rel='noopener'>{linkLabel}</a>.",
+    save:"Salva",clear:"Rimuovi",close:"Chiudi",connected:"● Connesso",artifactOn:"● Connesso tramite l'app Claude",notConnected:"○ Non connesso — uso il motore locale",
+    ollamaConnected:"● Ollama raggiungibile",ollamaNotConnected:"○ Ollama non raggiungibile — avvia prima il server",
+    keyMiniOn:"● Connesso",keyMiniOff:"○ Non connesso",
+    keySaved:"Chiave salvata",keyRemoved:"Chiave rimossa",keyBad:"Non sembra una chiave valida per questo provider",
+    setTitle:"Impostazioni",setProvider:"Provider",setModel:"Livello modello",setModelHint:"(usato quando la chiave API è attiva)",setKeyLbl:"Gestisci chiave API",
+    mFast:"Veloce",mFastS:"Haiku · economico",mBal:"Bilanciato",mBalS:"Sonnet",mAdv:"Avanzato",mAdvS:"Opus · costoso",
+    mFastSGlm:"GLM-4.5-Air · economico",mBalSGlm:"GLM-4.6",mAdvSGlm:"GLM-5.1 · costoso",
+    mFastSOllama:"Gemma3 1B · più piccolo",mBalSOllama:"Gemma3 (configurato)",mAdvSOllama:"Gemma3 12B · più grande",
+    setVerb:"Dettaglio riepilogo e domande",vShort:"Breve",vMed:"Medio",vLong:"Lungo",
+    setChap:"Lunghezza tipica capitolo",setChapHint:"(parole)",saved:"Impostazioni salvate",
+    setSpeech:"Lingua parlata",setSpeechHint:"(trascrizione)",setOut:"Lingua di riepilogo e domande",
+    setSplit:"Organizza in capitoli",spOn:"Sì",spOnS:"Divide e riepiloga",spOff:"No",spOffS:"Flusso unico continuo",
+    jumpToTranscript:"Vai alla trascrizione",jumpToRecap:"Vai al riepilogo",
+    featChap:"Capitoli",featAI:"Riepiloghi AI",featAsk:"Chiedi qualsiasi cosa",
+    secLang:"Lingue",secChap:"Capitoli e riepilogo",secAI:"Provider AI",
+    resetTitle:"Azzerare tutto?",resetMsg:"Questo elimina il testo trascritto, i capitoli e il riepilogo, e riparte da zero. L'azione non è reversibile.",
+    resetConfirm:"Elimina e ricomincia",cancel:"Annulla",
+    actCopy:"Copia",actShare:"Inoltra",actTxt:".txt",recapCopied:"Riepilogo copiato",recapShared:"Condiviso",recapSaved:"Riepilogo salvato (.txt)",
+    setVerbLbl:"Dettaglio riepilogo",setNq:"Domande intelligenti",setNqHint:"(per riepilogo/capitolo)",
+    ctxTitle:"Contesto della conversazione",ctxSub:"Descrivi l'obiettivo della conversazione e allega documenti da discutere. Viene aggiunto all'inizio del prompt per guidare riepiloghi e domande.",
+    ctxNote:"I file PDF, Word (.docx) e PowerPoint (.pptx) vengono analizzati nel browser e il loro testo è aggiunto al prompt — insieme a .txt/.md/.csv/.json/.html. Il contenuto è disponibile per riepiloghi e domande appena salvi, anche prima di trascrivere.",
+    attach:"Allega file",ctxSaved:"Contesto salvato",ctxOn:"● Contesto impostato",
+    ctxAttached:"{n} file allegati",ctxParseFailed:"Impossibile analizzare {n} file — allegati solo come nome",
+    ollamaSetupTitle:"Avvia Ollama in locale",
+    ollamaSetupSub:"Ollama è un server di modelli gratuito e open-source che gira sul tuo computer. Avvialo una volta prima di usare questo provider. Modello consigliato: gemma3 (Google Gemma 3).",
+    ollamaStep1:"1) Installa Ollama da ollama.com (macOS / Windows / Linux). Su Linux puoi anche eseguire:",
+    ollamaStep2:"2) Scarica il modello Gemma (solo la prima volta — scarica qualche GB):",
+    ollamaStep3:"3) Avvia il server Ollama (resta in esecuzione in background):",
+    ollamaStep4:"4) Torna qui, imposta l'endpoint (predefinito http://localhost:11434) e il nome modello, poi tocca Prova connessione.",
+    ollamaStopTitle:"Per fermarlo in seguito:",
+    ollamaStopHint:"Su Windows / macOS: clicca l'icona Ollama nella barra → Esci da Ollama.",
+    ollamaEndpoint:"Endpoint",ollamaModel:"Modello",
+    ollamaProbe:"Prova connessione",ollamaProbeOk:"Ollama raggiungibile ✓",ollamaProbeErr:"Ollama non raggiungibile — il server è in esecuzione?",
+    ollamaProbeChecking:"Verifica…",
+    histTitle:"Sessioni salvate",noSessions:"Nessuna sessione salvata.",sessionSaved:"Sessione salvata",sessionDeleted:"Sessione eliminata",sessionLoaded:"Sessione caricata",confirmDelete:"Eliminare questa sessione?",
+    open:"Apri",del:"Elimina",untitled:"Sessione senza titolo",
+    askTitle:"Chiedi alla trascrizione",askSub:"Chiedi qualsiasi cosa su ciò che è stato detto. Le risposte usano la trascrizione e il tuo contesto — puoi anche fare domande sui documenti allegati prima di iniziare a trascrivere.",
+    askThinking:"Sto pensando…",askNoLLM:"Connetti un provider AI (chiave 🔑) per fare domande.",askEmptyTr:"Niente trascritto ancora.",askNothing:"Aggiungi un contesto o trascrivi qualcosa prima.",
+  }
+};
+let uiLang="en";
+function set(id,v){const el=document.getElementById(id);if(el)el.textContent=v;}
+function applyUI(){
+  const d=I18N[uiLang];
+  document.getElementById("t-tag").innerHTML=d.tag;
+  document.getElementById("t-empty").innerHTML=d.empty;
+  set("t-featChap",d.featChap);set("t-featAI",d.featAI);set("t-featAsk",d.featAsk);
+  document.getElementById("t-copy").textContent=d.copy;
+  document.getElementById("t-export").textContent=d.export;
+  document.getElementById("t-recapbtn").textContent=d.recapbtn;
+  document.getElementById("t-keyTitle").textContent=d.keyTitle;
+  // settings labels
+  set("t-resetTitle",d.resetTitle);set("t-resetMsg",d.resetMsg);
+  set("t-setTitle",d.setTitle);set("t-setModelHint",d.setModelHint);set("t-setModel",d.setModel);
+  document.getElementById("t-setModel").innerHTML=d.setModel+` <span class="set-hint" id="t-setModelHint">${d.setModelHint}</span>`;
+  document.getElementById("t-setChap").innerHTML=d.setChap+` <span class="set-hint" id="t-setChapHint">${d.setChapHint}</span>`;
+  document.getElementById("t-setSpeech").innerHTML=d.setSpeech+` <span class="set-hint">${d.setSpeechHint}</span>`;
+  set("t-setOut",d.setOut);
+  set("t-setSplit",d.setSplit);set("t-spOn",d.spOn);set("t-spOnS",d.spOnS);set("t-spOff",d.spOff);set("t-spOffS",d.spOffS);
+  set("t-secLang",d.secLang);set("t-secChap",d.secChap);set("t-secAI",d.secAI);
+  set("t-setProvider",d.setProvider);set("t-setKeyLbl",d.setKeyLbl);
+  applyModelTierLabels();
+  set("t-setVerb",d.setVerbLbl);
+  document.getElementById("t-setNq").innerHTML=d.setNq+` <span class="set-hint">${d.setNqHint}</span>`;
+  set("t-mFast",d.mFast);set("t-mFastS",d.mFastS);set("t-mBal",d.mBal);set("t-mBalS",d.mBalS);set("t-mAdv",d.mAdv);set("t-mAdvS",d.mAdvS);
+  // context / history / ask panels
+  set("t-ctxTitle",d.ctxTitle);set("t-ctxSub",d.ctxSub);set("t-ctxNote",d.ctxNote);
+  set("t-histTitle",d.histTitle);set("t-askTitle",d.askTitle);set("t-askSub",d.askSub);
+  document.querySelectorAll("[data-t]").forEach(b=>{b.textContent=d[b.dataset.t]||b.textContent;});
+  updateKeyUI();
+}
+
+/* ---------- State ---------- */
+let recog=null, recording=false;
+let interim="", chapters=[], curBuf="", fullText="", lastTs=0;
+let audioCtx=null, analyser=null, rafId=null, micStream=null, micReady=false;
+let smoothLevel=0;          // EMA-smoothed RMS, drives the ring/colors so they don't flicker
+/* Volume tiers, calibrated against what browser speech recognition can actually
+   use: below ~8% RMS is marginal (orange); ~8–18% is the reliable working
+   range (yellow); above that it's solidly clean (green). A soft ceiling
+   above ~50% nudges back toward "good" rather than "perfect" since clipping
+   hurts transcription as much as a weak signal does. */
+const LVL_TIERS=[
+  {max:.08, css:"q1", c:"--lvl-q1", cb:"--lvl-q1b"},
+  {max:.18, css:"q2", c:"--lvl-q2", cb:"--lvl-q2b"},
+  {max:1,   css:"q3", c:"--lvl-q3", cb:"--lvl-q3b"}
+];
+function levelTier(rms){
+  if(rms>.5)return LVL_TIERS[1];                 // clipping risk → back off from "perfect"
+  for(const t of LVL_TIERS)if(rms<=t.max)return t;
+  return LVL_TIERS[LVL_TIERS.length-1];
+}
+let isFirstChapter=true, lastOverview=null;
+/* Speaker recognition (heuristic, voice-pitch based) — stable identity per person */
+let segments=[];            // current buffer split into {speaker,text} pieces
+let speakers=[];            // [{pitch, count}] running pitch centroid per recognized speaker
+let pitchSamples=[];        // recent voiced f0 samples {t,f}
+let currentSpeaker=0, lastUtteranceEnd=0, lastActivityTs=0;
+const STICK_TOL=34;         // Hz: stay on the current speaker within this (absorbs intonation)
+const MERGE_TOL=30;         // Hz: match an existing other speaker within this, else it's a new person
+const SENTENCE_PAUSE_MS=1100; // no speech for this long → end the sentence with a full stop
+/* Bright colors for the dark in-app cards; darker variants for the white Word export. */
+const PALETTE=[
+  {css:"sp-0",app:"#7ee0ff",word:"#0b6e8c"},
+  {css:"sp-1",app:"#ffd166",word:"#8a5d00"},
+  {css:"sp-2",app:"#5effa0",word:"#0a7d43"},
+  {css:"sp-3",app:"#ff9ecb",word:"#a83275"},
+  {css:"sp-4",app:"#c4a8ff",word:"#5a3fb0"},
+  {css:"sp-5",app:"#ffb270",word:"#9a521a"}
+];
+const pc=i=>PALETTE[((i%PALETTE.length)+PALETTE.length)%PALETTE.length];
+/* Per-section background tints — link a recapped transcript chunk to its recap card. */
+const SECTION_TINTS=[
+  {bg:"rgba(79,140,255,.15)", bd:"rgba(79,140,255,.55)", tx:"#a9caff", ac:"#4f8cff"},
+  {bg:"rgba(61,220,151,.13)", bd:"rgba(61,220,151,.55)", tx:"#86f0bd", ac:"#3ddc97"},
+  {bg:"rgba(255,209,102,.14)",bd:"rgba(255,209,102,.55)",tx:"#ffe39a", ac:"#ffd166"},
+  {bg:"rgba(255,158,203,.14)",bd:"rgba(255,158,203,.55)",tx:"#ffc2dd", ac:"#ff9ecb"},
+  {bg:"rgba(176,107,255,.16)",bd:"rgba(176,107,255,.55)",tx:"#cdb0ff", ac:"#b06bff"},
+  {bg:"rgba(0,212,255,.13)",  bd:"rgba(0,212,255,.55)",  tx:"#93e9ff", ac:"#00d4ff"}
+];
+const sectionTint=i=>SECTION_TINTS[((i%SECTION_TINTS.length)+SECTION_TINTS.length)%SECTION_TINTS.length];
+
+const $=s=>document.querySelector(s);
+const scroll=$("#scroll"),chaptersEl=$("#chapters"),liveCard=$("#liveCard"),liveTxt=$("#liveTxt"),
+  empty=$("#empty"),dot=$("#dot"),stat=$("#stat"),recBtn=$("#rec"),ico=$("#ico"),wave=$("#wave"),
+  toast=$("#toast"),overview=$("#overview"),recapBtn=$("#recapBtn"),wc=$("#wc"),
+  lvlFill=$("#lvlFill");
+
+function tt(m){toast.textContent=m;toast.classList.add("show");clearTimeout(tt._t);tt._t=setTimeout(()=>toast.classList.remove("show"),2200);}
+function esc(s){return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+/* ---------- Analysis engine ---------- */
+const STOP_EN=new Set("the a an and or but to of in on at for with is are was were be been being it this that these those i you he she we they my your our their as so if then than have has had do does did will would can could should not no yes ok okay just really very much more most some any all what when where why how who which about into out up down over here also gonna wanna kind sort like well yeah".split(" "));
+const STOP_IT=new Set("il lo la i gli le un uno una di a da in con su per tra fra che e o ma se poi più molto come dove quando perché chi cosa non sì no ok va bene questo quello sono è siamo ho hai ha abbiamo avete hanno fare essere stato anche già ancora solo proprio cioè allora quindi però adesso qui ecco delle nella sulla queste questi".split(" "));
+
+function wordsOf(t){return (t.toLowerCase().match(/[a-zàèéìòùç']+/g)||[]);}
+function keywords(text,lang,n){
+  const stop=lang==="it"?STOP_IT:STOP_EN,freq={};
+  wordsOf(text).forEach(w=>{if(w.length<4||stop.has(w))return;freq[w]=(freq[w]||0)+1;});
+  return Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,n||5).map(x=>x[0]);
+}
+function contentSet(text,lang){
+  const stop=lang==="it"?STOP_IT:STOP_EN,s=new Set();
+  wordsOf(text).forEach(w=>{if(w.length>=4&&!stop.has(w))s.add(w);});
+  return s;
+}
+function titleCase(s){return s.replace(/\b\w/g,c=>c.toUpperCase());}
+function makeTitle(text,lang){const k=keywords(text,lang,3);return k.length?titleCase(k.join(" · ")):(lang==="it"?"Discussione":"Discussion");}
+
+function sentencesOf(text){return text.split(/(?<=[.!?。…])\s+|\n+/).map(s=>s.trim()).filter(s=>s.length>10);}
+
+function makeRecap(text,lang,maxLen,maxSents){
+  const sents=sentencesOf(text);
+  if(!sents.length)return text.slice(0,maxLen||240);
+  const k=new Set(keywords(text,lang,8));
+  const scored=sents.map((s,i)=>{
+    let sc=0;wordsOf(s).forEach(w=>{if(k.has(w))sc++;});
+    if(i===0)sc+=1.2; // opening sentence often frames topic
+    return {s,sc:sc+Math.min(s.length/90,1.4)};
+  }).sort((a,b)=>b.sc-a.sc);
+  const lim=maxLen||240,cap=maxSents||verb().sents,take=[];let len=0;
+  for(const o of scored){if(len+o.s.length>lim&&take.length)break;take.push(o);len+=o.s.length;if(take.length>=cap)break;}
+  // preserve original order
+  take.sort((a,b)=>sents.indexOf(a.s)-sents.indexOf(b.s));
+  let out=take.map(x=>x.s).join(" ");
+  return out.length>lim+40?out.slice(0,lim+37)+"…":out;
+}
+
+const Q_TPL={
+  en:[k=>`What's the next concrete step on ${k}?`,k=>`Who owns ${k}, and by when?`,
+    k=>`What could block progress on ${k}?`,k=>`How do we measure success for ${k}?`,
+    k=>`What assumptions are we making about ${k}?`,k=>`Is there a dependency between ${k} and other workstreams?`,
+    k=>`What would change our mind about ${k}?`,k=>`What's the cost or risk if ${k} slips?`,
+    k=>`Do we have alignment from stakeholders on ${k}?`],
+  it:[k=>`Qual è il prossimo passo concreto su ${k}?`,k=>`Chi è responsabile di ${k}, ed entro quando?`,
+    k=>`Cosa potrebbe bloccare ${k}?`,k=>`Come misuriamo il successo di ${k}?`,
+    k=>`Quali ipotesi stiamo facendo su ${k}?`,k=>`C'è una dipendenza tra ${k} e altri flussi?`,
+    k=>`Cosa ci farebbe cambiare idea su ${k}?`,k=>`Qual è il rischio se ${k} slitta?`,
+    k=>`Abbiamo l'allineamento degli stakeholder su ${k}?`]
+};
+function makeQuestions(text,srcLang,tplLang,count){
+  const want=count==null?3:count;
+  if(want<=0)return [];
+  const k=keywords(text,srcLang,6),tpl=Q_TPL[tplLang]||Q_TPL.en,idx=[0,2,3,5,6,1],picks=[];
+  if(!k.length)return [tpl[0]("this"),tpl[2]("this")].slice(0,want);
+  for(let i=0;i<want;i++){picks.push(tpl[idx[i%idx.length]](k[i%k.length]));}
+  return picks;
+}
+
+async function analyzeChapter(text){
+  const out=settings.out, src=settings.speech;   // out = recap/questions language; src = transcript language
+  if(LLM.enabled){try{const r=await LLM.call(text,out,"chapter");
+    if(r&&r.title&&r.recap)return{...r,questions:(Array.isArray(r.questions)?r.questions:[]).slice(0,settings.nq),lang:src,text,_src:"llm"};}catch(e){}}
+  return{title:makeTitle(text,src),recap:makeRecap(text,src,verb().recapLen),questions:makeQuestions(text,src,out,settings.nq),lang:src,text};
+}
+function makeBullets(text,lang){
+  // Build an extensive, ordered set of bullet points spanning the whole transcript.
+  const sents=sentencesOf(text);
+  if(!sents.length)return [];
+  const k=new Set(keywords(text,lang,14));
+  // score every sentence, keep the informative ones, preserve original order
+  const scored=sents.map((s,i)=>{
+    let sc=0;wordsOf(s).forEach(w=>{if(k.has(w))sc++;});
+    return {s,i,sc:sc+Math.min(s.length/110,1.2)};
+  });
+  // dynamic target: ~1 bullet per 2 sentences, min 5, max 18
+  const target=Math.max(5,Math.min(18,Math.round(sents.length/2)));
+  const picked=scored.slice().sort((a,b)=>b.sc-a.sc).slice(0,target)
+    .sort((a,b)=>a.i-b.i);
+  // de-dupe near-identical bullets
+  const out=[],seen=[];
+  for(const o of picked){
+    const sig=wordsOf(o.s).filter(w=>k.has(w)).slice(0,4).join(" ");
+    if(seen.includes(sig)&&sig)continue;seen.push(sig);
+    let b=o.s.replace(/\s+/g," ").trim();
+    b=b.charAt(0).toUpperCase()+b.slice(1);
+    out.push(b);
+  }
+  return out;
+}
+function makeSections(lang){
+  // Build coherent sections from the whole conversation, in order.
+  // Each committed chapter is already a coherent topic → one section.
+  const pts=verb().pts;
+  const secs=chapters.map(c=>({
+    title:c.title,
+    summary:c.recap,
+    points:makeBullets(c.text,lang).slice(0,pts)
+  }));
+  // Include the uncommitted tail (current buffer) as a final section if it has substance.
+  const tail=curBuf.trim();
+  if(tail.split(/\s+/).filter(Boolean).length>=MIN_WORDS){
+    secs.push({title:makeTitle(tail,lang),summary:makeRecap(tail,lang,verb().secLen),points:makeBullets(tail,lang).slice(0,pts)});
+  }
+  // If nothing was chaptered yet, derive a single section from everything captured.
+  if(!secs.length){
+    const t=allText();
+    if(t)secs.push({title:makeTitle(t,lang),summary:makeRecap(t,lang,verb().secLen),points:makeBullets(t,lang).slice(0,pts)});
+  }
+  // Context-only fallback: no transcript at all but the user attached docs.
+  // Build a section per attached document so the recap stays useful.
+  if(!secs.length && hasContext()){
+    (context.files||[]).forEach(f=>{
+      if(f.text && f.text.trim()){
+        secs.push({
+          title:f.name.replace(/\.[^.]+$/,"").slice(0,40)||"Document",
+          summary:makeRecap(f.text,lang,verb().secLen),
+          points:makeBullets(f.text,lang).slice(0,pts)
+        });
+      }
+    });
+    if(!secs.length && context.objective && context.objective.trim()){
+      secs.push({title:makeTitle(context.objective,lang),summary:makeRecap(context.objective,lang,verb().secLen),points:[]});
+    }
+  }
+  return secs;
+}
+async function analyzeOverview(text){
+  const out=settings.out, src=settings.speech;
+  if(LLM.enabled){try{const r=await LLM.call(text,out,"overview");
+    if(r&&r.recap)return{...r,questions:(Array.isArray(r.questions)?r.questions:[]).slice(0,settings.nq),lang:src,_src:"llm"};}catch(e){}}
+  return{recap:makeRecap(text||contextBlock(),src,verb().ovLen),sections:makeSections(src),questions:makeQuestions(text||contextBlock(),src,out,settings.nq),lang:src};
+}
+
+/* ---------- Concept-based chapter splitting ----------
+   Chapter length is set in Settings (typical words per chapter). A new chapter
+   forms when EITHER: a clear topic shift on an already-substantial chunk, the
+   chunk reaches the target length, or a long pause (>=9s) on a substantial chunk.
+*/
+let FIRST_MIN=195, MIN_WORDS=195, MAX_WORDS=300; const PAUSE_MS=9000;
+function applyChapterLen(n){ MAX_WORDS=n; MIN_WORDS=Math.max(40,Math.round(n*0.65)); FIRST_MIN=MIN_WORDS; }
+let recentSentences=[]; // for topic-shift comparison
+
+function topicShift(){
+  // compare last sentence's content words against the chapter buffer so far
+  const sents=sentencesOf(curBuf);
+  if(sents.length<3)return false;
+  const recent=sents.slice(-2).join(" ");
+  const earlier=sents.slice(0,-2).join(" ");
+  const lang=settings.speech;
+  const a=contentSet(earlier,lang),b=contentSet(recent,lang);
+  if(b.size<3)return false;
+  let overlap=0;b.forEach(w=>{if(a.has(w))overlap++;});
+  const ratio=overlap/b.size;
+  return ratio<0.10; // very few shared concepts → a genuinely new topic (keeps chapters long)
+}
+
+function curWords(){return curBuf.trim().split(/\s+/).filter(Boolean).length;}
+
+async function commitChapter(){
+  const text=curBuf.trim();
+  const w=text.split(/\s+/).filter(Boolean).length;
+  if(w<MIN_WORDS){return;} // too small, keep accumulating
+  endSentence();                 // close the final sentence of this section
+  const segs=segments.slice();   // capture speaker-tagged transcript for this chapter
+  curBuf="";segments=[];
+  // Push the section immediately (pending) so the transcript window keeps showing
+  // everything while the recap is being generated; fill in title/recap when ready.
+  const ch={id:Date.now(),title:"",recap:"",questions:[],text,lang:settings.speech,words:w,segments:segs,isNew:false,pending:true};
+  chapters.push(ch);
+  isFirstChapter=false;
+  refreshChapters();renderLive();
+  const a=await analyzeChapter(text);
+  Object.assign(ch,{title:a.title,recap:a.recap,questions:a.questions,text:a.text,lang:a.lang,pending:false,isNew:true});
+  refreshChapters();renderLive();   // recap ready → highlight this section + its recap card
+  setTimeout(()=>{ch.isNew=false;refreshChapters();},1600);
+}
+
+function evaluateSplit(pause){
+  if(!settings.split)return;     // chaptering off → everything stays in one continuous stream
+  const w=curWords();
+  if(w===0)return;
+  const floor=isFirstChapter?FIRST_MIN:MIN_WORDS;
+  if(pause && w>=floor){commitChapter();return;}
+  if(w>=MAX_WORDS){commitChapter();return;}
+  if(!isFirstChapter && w>=MIN_WORDS && topicShift()){commitChapter();return;}
+}
+
+/* ---------- Rendering ---------- */
+function renderChapter(ch,i){
+  const d=I18N[uiLang],el=document.createElement("div"),t=sectionTint(i);
+  el.className="chap open";el.id="chap-"+ch.id;el.dataset.id=ch.id;
+  // match the tint of this section's transcript block so the pairing is obvious
+  el.style.background=t.bg;el.style.borderColor=t.bd;el.style.setProperty("--secac",t.ac);
+  const body=ch.pending
+    ? `<div class="ov-think"><span class="sp"></span>${d.thinking}</div>`
+    : `<div class="recap">${esc(ch.recap)}</div>`+
+      (settings.nq>0&&ch.questions&&ch.questions.length?`<div class="qh">✦ ${d.questions}</div>
+       <div class="qs">${ch.questions.slice(0,settings.nq).map(q=>`<div class="q"><span class="spark">✦</span><span>${esc(q)}</span></div>`).join("")}</div>`:"");
+  el.innerHTML=`
+    <div class="chap-hd">
+      <div class="chap-num" style="background:${t.ac}">${i+1}</div>
+      <div class="chap-meta">
+        <div class="chap-title">${ch.pending?"…":esc(ch.title)}</div>
+        <div class="chap-sub">${d.chapter} · ${ch.words} ${d.words} <span class="pill">${ch.lang.toUpperCase()}</span>${ch.isNew?`<span class="pill new">NEW</span>`:""}</div>
+      </div>
+      <button class="jumpBtn" data-jump="seg-${ch.id}" title="${esc(d.jumpToTranscript)}" aria-label="${esc(d.jumpToTranscript)}" style="color:${t.ac}">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <div class="chev"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
+    <div class="chap-body"><div class="chap-inner">${body}</div></div>`;
+  el.querySelector(".chap-hd").addEventListener("click",e=>{if(e.target.closest(".jumpBtn"))return;el.classList.toggle("open");});
+  el.querySelector(".jumpBtn").addEventListener("click",e=>{e.stopPropagation();jumpTo("seg-"+ch.id);});
+  el.querySelectorAll(".q").forEach(q=>q.addEventListener("click",()=>{navigator.clipboard?.writeText(q.textContent.trim());tt(I18N[uiLang].qCopied);}));
+  return el;
+}
+/* Smooth-scroll to a chapter card or transcript block by id, opening the
+   chapter if it's collapsed, and giving it a brief highlight so the jump
+   is obvious even on a long page. */
+function jumpTo(id){
+  const el=document.getElementById(id);
+  if(!el)return;
+  if(el.classList.contains("chap"))el.classList.add("open");
+  el.scrollIntoView({behavior:"smooth",block:"center"});
+  el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");
+  setTimeout(()=>el.classList.remove("flash"),900);
+}
+
+function refreshChapters(){
+  empty.style.display=(chapters.length||recording||curBuf.trim())?"none":"block";
+  chaptersEl.innerHTML="";
+  chapters.forEach((c,i)=>chaptersEl.appendChild(renderChapter(c,i)));
+  renderSections();   // keep the tinted transcript blocks in sync with the recap cards
+  updateRecapBtn();
+}
+
+/* ---------- Overview / recap-so-far ---------- */
+function allText(){return (chapters.map(c=>c.text).join(" ")+" "+curBuf).trim();}
+function totalWords(){return allText().split(/\s+/).filter(Boolean).length;}
+
+function updateRecapBtn(){
+  // Show the Recap button whenever there's enough transcript OR the user has
+  // supplied context (objective / attached docs). With context alone, the
+  // recap is grounded in the documents — useful before transcription starts.
+  const t=totalWords();
+  recapBtn.classList.toggle("show", t>=20 || hasContext());
+  wc.textContent = t? (t+" "+I18N[uiLang].words):"";
+}
+
+/* Build the "by section" HTML for the overview. Each section gets a jump link:
+   - If the sections line up 1:1 with committed chapters, jump straight to the
+     matching transcript block (seg-${id}).
+   - If the section index falls within the chapter range (but counts differ),
+     still link to the closest chapter's transcript block — partial linking is
+     better than none.
+   - If there are no chapters at all (chaptering off, or context-only recap),
+     fall back to jumping to the live transcript area so the user still lands
+     somewhere useful.
+   This makes the recap ↔ transcript link work "when applicable" — i.e.
+   whenever there is a corresponding transcript block to jump to. */
+function ovSectionsHtml(a,d){
+  const sections=Array.isArray(a.sections)?a.sections:[];
+  if(!sections.length)
+    return (a.bullets&&a.bullets.length?`<div class="qh" style="margin:4px 0 9px">▸ ${d.keypoints}</div><ul class="ov-bul">${a.bullets.map(b=>`<li>${esc(b)}</li>`).join("")}</ul>`:"");
+  const linkable=sections.length===chapters.length && chapters.length>0;
+  const liveTarget = chapters.length ? null : "liveCard";
+  return `<div class="qh" style="margin:4px 0 9px">▸ ${d.bysection}</div><div class="ov-sections">`+
+    sections.map((s,i)=>{
+      let jumpTarget=null, jumpTitle=d.jumpToTranscript;
+      if(linkable){ jumpTarget="seg-"+chapters[i].id; }
+      else if(chapters.length && i<chapters.length){ jumpTarget="seg-"+chapters[i].id; }
+      else if(liveTarget){ jumpTarget=liveTarget; }
+      const jump=jumpTarget?`<button class="jumpBtn sm" data-jump="${jumpTarget}" title="${esc(jumpTitle)}" aria-label="${esc(jumpTitle)}">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
+        </button>`:"";
+      return `<div class="ov-sec">
+          <div class="ov-sec-hd"><span class="ov-sec-n">${i+1}</span><span style="flex:1">${esc(s.title||"")}</span>${jump}</div>
+          ${s.summary?`<div class="ov-sec-sum">${esc(s.summary)}</div>`:""}
+          ${Array.isArray(s.points)&&s.points.length?`<ul class="ov-bul">${s.points.map(p=>`<li>${esc(p)}</li>`).join("")}</ul>`:""}
+        </div>`;
+    }).join("")+`</div>`;
+}
+function bindOvSectionJumps(root){
+  root.querySelectorAll(".jumpBtn[data-jump]").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();jumpTo(b.dataset.jump);}));
+}
+
+async function buildOverview(){
+  const text=allText();
+  const wordCount=text.split(/\s+/).filter(Boolean).length;
+  // Need either enough transcript OR an active context (objective / docs).
+  // With context alone the recap is grounded in the documents — useful when
+  // the user wants to query the material before transcribing anything.
+  if(wordCount<20 && !hasContext()){tt(I18N[uiLang].noContent);return;}
+  const d=I18N[uiLang];
+  recapBtn.style.opacity=".6";recapBtn.style.pointerEvents="none";
+  // show thinking state if the LLM is in play
+  if(LLM.enabled){
+    overview.style.display="block";
+    overview.innerHTML=`<div class="ov-hd"><div class="ic">✨</div><div class="ti">${d.ovTitle}</div></div>
+      <div class="ov-think"><span class="sp"></span>${d.thinking}</div>`;
+    overview.style.animation="none";void overview.offsetWidth;overview.style.animation="rise .5s cubic-bezier(.2,.8,.2,1) both";
+    scroll.scrollTo({top:0,behavior:"smooth"});
+  }
+  const a=await analyzeOverview(text);
+  lastOverview=a;
+  recapBtn.style.opacity="";recapBtn.style.pointerEvents="";
+  const now=new Date().toLocaleTimeString(uiLang==="it"?"it-IT":"en-US",{hour:"2-digit",minute:"2-digit"});
+  // Coherent sections covering the whole conversation (fall back to bullets if an older shape comes back).
+  const sectionsHtml=ovSectionsHtml(a,d);
+  overview.style.display="block";
+  const icCopy='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>';
+  const icShare='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/></svg>';
+  const icTxt='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v5h5"/><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M9 13h6M9 17h4"/></svg>';
+  overview.innerHTML=`
+    <div class="ov-hd"><div class="ic">✨</div><div class="ti">${d.ovTitle}</div><div class="tm">${a._src==="llm"?"AI":"·"} ${now} · ${totalWords()} ${d.words}</div></div>
+    <div class="ov-actions">
+      <button class="ov-act" data-act="copy">${icCopy}${d.actCopy}</button>
+      <button class="ov-act" data-act="share">${icShare}${d.actShare}</button>
+      <button class="ov-act" data-act="txt">${icTxt}${d.actTxt}</button>
+    </div>
+    <div class="ov-recap">${esc(a.recap)}</div>
+    ${sectionsHtml}
+    ${(settings.nq>0&&a.questions&&a.questions.length)?`<div class="qh" style="margin-bottom:9px">★ ${d.topq}</div>
+    ${a.questions.slice(0,settings.nq).map((q,n)=>`<div class="ov-q"><span class="n">${n+1}</span><span>${esc(q)}</span></div>`).join("")}`:""}`;
+  overview.querySelectorAll(".ov-q").forEach(q=>q.addEventListener("click",()=>{navigator.clipboard?.writeText(q.textContent.replace(/^\d+/,"").trim());tt(d.qCopied);}));
+  overview.querySelectorAll(".ov-act").forEach(b=>b.addEventListener("click",()=>recapAction(b.dataset.act)));
+  bindOvSectionJumps(overview);
+  overview.style.animation="none";void overview.offsetWidth;overview.style.animation="rise .5s cubic-bezier(.2,.8,.2,1) both";
+  scroll.scrollTo({top:0,behavior:"smooth"});
+  tt(d.updated);
+}
+recapBtn.addEventListener("click",buildOverview);
+
+/* Plain-text version of the current recap, for copy / forward / save. */
+function recapText(){
+  const ov=lastOverview,d=I18N[uiLang]; if(!ov||!ov.recap)return "";
+  let s=d.ovTitle+"\n\n"+(ov.recap||"")+"\n";
+  if(Array.isArray(ov.sections)&&ov.sections.length){
+    s+="\n"+d.bysection+"\n";
+    ov.sections.forEach((sec,i)=>{ s+="\n"+(i+1)+". "+(sec.title||"")+"\n"; if(sec.summary)s+=sec.summary+"\n"; if(Array.isArray(sec.points))sec.points.forEach(p=>s+="  • "+p+"\n"); });
+  } else if(Array.isArray(ov.bullets)&&ov.bullets.length){
+    s+="\n"+d.keypoints+"\n"; ov.bullets.forEach(b=>s+="  • "+b+"\n");
+  }
+  if(Array.isArray(ov.questions)&&ov.questions.length){ s+="\n"+d.topq+"\n"; ov.questions.slice(0,3).forEach((q,n)=>s+=(n+1)+". "+q+"\n"); }
+  return s.trim();
+}
+async function recapAction(act){
+  const d=I18N[uiLang], text=recapText();
+  if(!text){tt(d.noContent);return;}
+  if(act==="copy"){ const ok=await copyText(text); tt(ok?d.recapCopied:d.nothingYet); }
+  else if(act==="share"){
+    if(navigator.share){ try{ await navigator.share({title:"Smart reporter — "+d.ovTitle, text}); tt(d.recapShared); }catch(e){} }
+    else { const ok=await copyText(text); tt(ok?d.recapCopied:d.nothingYet); }
+  } else if(act==="txt"){
+    const blob=new Blob([text],{type:"text/plain;charset=utf-8"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download=`recap-${new Date().toISOString().slice(0,10)}.txt`;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1500); tt(d.recapSaved);
+  }
+}
+
+/* ---------- Mic: acquire ONCE, keep alive (no repeat prompts) ---------- */
+async function ensureMic(){
+  if(micReady && micStream && micStream.active) return true;
+  try{
+    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+    micReady=true;
+    if(!audioCtx){
+      audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+      const src=audioCtx.createMediaStreamSource(micStream);
+      analyser=audioCtx.createAnalyser();analyser.fftSize=2048;analyser.smoothingTimeConstant=.3;src.connect(analyser);
+    }
+    return true;
+  }catch(e){tt(I18N[uiLang].mic);return false;}
+}
+
+/* ---------- Speaker diarization (heuristic) ----------
+   Estimate the speaker's vocal pitch (fundamental frequency, f0) from the live
+   audio via autocorrelation, sampled while someone is talking. Each finalized
+   utterance is matched to the nearest known speaker pitch; if the tone is far
+   enough from every known speaker, it's treated as a NEW person. Same person
+   tends to land near the same pitch → same color. This is approximate, not
+   forensic — it nudges coloring, it doesn't guarantee identity. */
+function detectPitch(){
+  if(!analyser||!analyser.getFloatTimeDomainData)return null;
+  const N=Math.min(1536,analyser.fftSize),buf=new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+  let r0=0;for(let i=0;i<N;i++)r0+=buf[i]*buf[i];
+  const rms=Math.sqrt(r0/N);
+  if(rms<0.013)return null;                        // too quiet → unvoiced/silence
+  const sr=(audioCtx&&audioCtx.sampleRate)||44100;
+  const minLag=Math.max(2,Math.floor(sr/350)),maxLag=Math.min(N-1,Math.floor(sr/70)); // 70–350 Hz
+  // normalized autocorrelation (divided by the number of summed terms so it
+  // isn't biased toward short lags)
+  const norms=new Float32Array(maxLag+1);
+  let bestNorm=0;
+  for(let lag=minLag;lag<=maxLag;lag++){
+    let c=0;for(let i=0;i<N-lag;i++)c+=buf[i]*buf[i+lag];
+    const norm=c/(N-lag);norms[lag]=norm;
+    if(norm>bestNorm)bestNorm=norm;
+  }
+  if(bestNorm<=0||bestNorm<0.28*(r0/N))return null;  // clarity gate: reject aperiodic/noisy frames
+  // pick the FIRST strong local-max peak → the true fundamental, avoiding the
+  // octave-down errors you get when a multiple of the period correlates as well
+  let bestLag=-1;
+  for(let lag=minLag+1;lag<maxLag;lag++){
+    if(norms[lag]>=0.85*bestNorm&&norms[lag]>=norms[lag-1]&&norms[lag]>=norms[lag+1]){bestLag=lag;break;}
+  }
+  if(bestLag<=0)return null;
+  return sr/bestLag;
+}
+function median(a){const s=a.slice().sort((x,y)=>x-y);return s.length?s[Math.floor(s.length/2)]:null;}
+function recentMed(ms){return median(pitchSamples.filter(s=>s.t>=Date.now()-ms).map(s=>s.f));}
+/* Identify WHO spoke the utterance that just ended, from the median pitch over
+   its voiced samples. Goal: stable identity → one color per person. Natural
+   intonation within a speaker (questions, emphasis) is absorbed by the sticky
+   tolerance, so the color does NOT flip on tone alone — only a clearly
+   different voice becomes a different speaker. */
+function classifyUtterance(){
+  const win=pitchSamples.filter(s=>s.t>=lastUtteranceEnd);
+  lastUtteranceEnd=Date.now();
+  if(win.length<3)return currentSpeaker;            // too little voice → assume same speaker
+  const med=median(win.map(s=>s.f));
+  if(speakers.length===0){speakers.push({pitch:med,count:1});currentSpeaker=0;return 0;}
+  // 1) stay with the current speaker unless the pitch is clearly different
+  if(Math.abs(speakers[currentSpeaker].pitch-med)<=STICK_TOL){
+    const sp=speakers[currentSpeaker];sp.pitch=sp.pitch*0.85+med*0.15;sp.count++;return currentSpeaker;
+  }
+  // 2) otherwise match the nearest known speaker within a merge tolerance
+  let best=-1,bd=1e9;speakers.forEach((s,i)=>{const d=Math.abs(s.pitch-med);if(d<bd){bd=d;best=i;}});
+  if(best>=0&&bd<=MERGE_TOL){const sp=speakers[best];sp.pitch=sp.pitch*0.85+med*0.15;sp.count++;currentSpeaker=best;return best;}
+  // 3) genuinely new voice → new speaker (new color)
+  speakers.push({pitch:med,count:1});currentSpeaker=speakers.length-1;return currentSpeaker;
+}
+function rebuildCurBuf(){curBuf=segments.map(s=>s.text).join(" ")+(segments.length?" ":"");}
+/* Close the current sentence with a full stop — called only on a real pause or
+   at a speaker turn, so punctuation stays sparse and meaningful. */
+function endSentence(){
+  const last=segments[segments.length-1];
+  if(last&&!/[.!?…]$/.test(last.text)){last.text+=".";rebuildCurBuf();return true;}
+  return false;
+}
+
+/* ---------- Speech recognition ---------- */
+function pickLang(){return settings.speech==="it"?"it-IT":"en-US";}
+/* Append a finalized phrase. We do NOT punctuate every phrase — consecutive
+   phrases from the same speaker are joined with a space and only become
+   separate sentences when a pause (endSentence) or a speaker turn occurs. */
+function appendFinal(t,speaker){
+  t=t.replace(/\s+/g," ").trim();
+  if(!t)return;
+  const last=segments[segments.length-1];
+  if(last&&last.speaker===speaker){
+    if(/[.!?…]$/.test(last.text))t=t.charAt(0).toUpperCase()+t.slice(1); // new sentence after a pause
+    last.text+=" "+t;
+  }else{
+    if(last)endSentence();                          // a different speaker → end the previous turn
+    segments.push({speaker,text:t.charAt(0).toUpperCase()+t.slice(1)});
+  }
+  rebuildCurBuf();
+}
+function startRecog(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){tt(I18N[uiLang].noSupport);return false;}
+  recog=new SR();recog.continuous=true;recog.interimResults=true;recog.lang=pickLang();
+  recog.onresult=e=>{
+    interim="";
+    lastActivityTs=Date.now();                 // any speech (interim or final) = active
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const r=e.results[i];
+      if(r.isFinal){const t=r[0].transcript.trim();
+        if(t){
+          appendFinal(t,classifyUtterance());   // one stable speaker per utterance
+          lastTs=Date.now();
+          evaluateSplit(false);}
+      } else interim+=r[0].transcript;
+    }
+    renderLive();updateRecapBtn();
+  };
+  recog.onerror=e=>{if(e.error==="not-allowed"||e.error==="service-not-allowed"){tt(I18N[uiLang].mic);stop();}};
+  recog.onend=()=>{if(recording){try{recog.lang=pickLang();recog.start();}catch(_){}}};
+  try{recog.start();}catch(_){}
+  return true;
+}
+/* Render a list of {speaker,text} segments with per-speaker colors. */
+function segHtml(segs){
+  return (segs||[]).map(s=>`<span class="${pc(s.speaker).css}">${esc(s.text)}</span>`).join(" ");
+}
+/* The transcript window holds the WHOLE conversation and never empties:
+   committed (recapped) sections as tinted blocks, then the in-progress tail. */
+function ensureLiveStructure(){
+  if(!document.getElementById("segSecWrap"))
+    liveTxt.innerHTML='<div id="segSecWrap"></div><div id="segLive"></div>';
+}
+function renderSections(){
+  const d=I18N[uiLang];
+  ensureLiveStructure();
+  document.getElementById("segSecWrap").innerHTML=chapters.map((c,i)=>{
+    const t=sectionTint(i),flash=(c.isNew&&!c.pending)?" flash":"";
+    const tag=esc(I18N[uiLang].chapter)+" "+(i+1)+(c.pending?" · …":" · "+esc(c.title));
+    const segs=c.segments&&c.segments.length?c.segments:[{speaker:0,text:c.text}];
+    const jump=c.pending?"":`<button class="jumpBtn sm" data-jump="chap-${c.id}" title="${esc(d.jumpToRecap)}" aria-label="${esc(d.jumpToRecap)}" style="color:${t.tx}">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+      </button>`;
+    return `<div class="seg-sec${flash}" id="seg-${c.id}" style="background:${t.bg};border-color:${t.bd}">
+        <div class="seg-sec-tag" style="color:${t.tx}"><span>●&nbsp;${tag}</span>${jump}</div>
+        <div class="seg-sec-tx">${segHtml(segs)}</div>
+      </div>`;
+  }).join("");
+  document.querySelectorAll('#segSecWrap .jumpBtn[data-jump]').forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();jumpTo(b.dataset.jump);}));
+}
+function renderLive(){
+  liveCard.style.display="block";
+  ensureLiveStructure();
+  const tail=segHtml(segments);
+  // interim shown in the current speaker's color (stable; no per-tone flicker)
+  const interimHtml=interim?`<span class="${pc(currentSpeaker).css}" style="opacity:.78">${esc(interim)}</span>`:"";
+  const inner=(tail||interimHtml)?`${tail}${tail&&interimHtml?" ":""}${interimHtml}`:"";
+  document.getElementById("segLive").innerHTML=`<div class="seg-live">${inner}<span class="cursor"></span></div>`;
+  liveTxt.scrollTop=liveTxt.scrollHeight;   // keep the latest text in view
+}
+
+/* pause detection */
+setInterval(()=>{
+  if(!recording)return;
+  // chapter break on a long pause
+  if(curBuf.trim()&&Date.now()-lastTs>PAUSE_MS){evaluateSplit(true);lastTs=Date.now();}
+  // sentence full stop once speech has paused (no interim/final for a moment)
+  if(segments.length&&!interim&&Date.now()-lastActivityTs>SENTENCE_PAUSE_MS){if(endSentence())renderLive();}
+},500);
+
+/* sample vocal pitch a few times per second while recording (for speaker coloring) */
+setInterval(()=>{
+  if(!recording)return;
+  const f=detectPitch();
+  if(f){
+    pitchSamples.push({t:Date.now(),f});
+    if(pitchSamples.length>500)pitchSamples.splice(0,pitchSamples.length-500);
+  }
+},110);
+
+/* ---------- Waveform + live level meter ----------
+   One requestAnimationFrame loop reads both the frequency bins (for the bar
+   waveform) and the time-domain signal (for RMS loudness). RMS is smoothed
+   with an EMA so the color/ring don't jitter on every syllable, then mapped
+   to a tier that recolors the button, ring meter, wave bars and label. */
+const RING_CIRC=2*Math.PI*43; // matches r=43 in the SVG ring
+function startWave(){
+  if(!analyser)return;
+  wave.innerHTML=Array.from({length:9}).map(()=>"<i></i>").join("");
+  const bars=[...wave.children];
+  const freqData=new Uint8Array(analyser.frequencyBinCount);
+  const timeData=new Float32Array(analyser.fftSize);
+  smoothLevel=0;
+  const loop=()=>{
+    analyser.getByteFrequencyData(freqData);
+    bars.forEach((b,i)=>{const v=freqData[2+i*5]||0;b.style.height=(6+(v/255)*32)+"px";});
+
+    analyser.getFloatTimeDomainData(timeData);
+    let sum=0;for(let i=0;i<timeData.length;i++)sum+=timeData[i]*timeData[i];
+    const rms=Math.sqrt(sum/timeData.length);
+    smoothLevel=smoothLevel*0.85+rms*0.15;          // EMA: smooth but still responsive
+
+    const tier=levelTier(smoothLevel);
+    const root=document.documentElement.style;
+    root.setProperty("--lvl-c",`var(${tier.c})`);
+    root.setProperty("--lvl-cb",`var(${tier.cb})`);
+    const pct=Math.max(.05,Math.min(1,smoothLevel/0.18));   // ring fills up to the "good" threshold
+    lvlFill.style.strokeDashoffset=(RING_CIRC*(1-pct)).toFixed(1);
+    if(tier.css!==recBtn.dataset.tier)recBtn.dataset.tier=tier.css;
+    rafId=requestAnimationFrame(loop);
+  };
+  loop();
+}
+function stopWave(){
+  cancelAnimationFrame(rafId);
+  wave.querySelectorAll("i").forEach(b=>b.style.height="6px");
+  recBtn.dataset.tier="";
+  lvlFill.style.strokeDashoffset=RING_CIRC;
+}
+
+/* ---------- Controls ---------- */
+async function start(){
+  const ok=await ensureMic(); if(!ok)return;
+  if(audioCtx&&audioCtx.state==="suspended"){try{await audioCtx.resume();}catch(_){}}
+  if(!startRecog())return;
+  recording=true;
+  // start a fresh pitch window so stale samples don't bias the first utterance
+  pitchSamples=[];lastUtteranceEnd=Date.now();lastActivityTs=Date.now();
+  recBtn.classList.add("live");
+  wave.style.display="flex";ico.style.display="none";
+  dot.classList.add("live");
+  stat.textContent=I18N[uiLang].listening;
+  empty.style.display="none";
+  startWave();
+}
+function stop(){
+  recording=false;
+  recBtn.classList.remove("live");
+  wave.style.display="none";ico.style.display="block";
+  dot.classList.remove("live");
+  stat.textContent=I18N[uiLang].stopped;
+  if(recog){try{recog.stop();}catch(_){}}
+  stopWave();
+  endSentence();          // finish the last sentence when recording stops
+  evaluateSplit(true);
+  // NOTE: we intentionally do NOT stop micStream tracks, so iOS keeps
+  // the permission warm and won't re-prompt on the next recording.
+  if(audioCtx&&audioCtx.state==="running"){/* keep ctx alive */}
+  // keep the transcript window visible if anything was captured (sections or tail)
+  setTimeout(()=>{renderLive();if(!curBuf.trim()&&!chapters.length)liveCard.style.display="none";updateRecapBtn();},300);
+}
+recBtn.addEventListener("click",()=>{recording?stop():start();});
+
+function fullTranscript(){
+  // Joined, readable transcript of everything captured so far.
+  const parts=chapters.map(c=>c.text.trim());
+  if(curBuf.trim())parts.push(curBuf.trim());
+  return parts.join("\n\n").replace(/\s+\./g,".").trim();
+}
+async function copyText(str){
+  try{
+    if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(str);return true;}
+  }catch(e){}
+  // fallback for older iOS Safari
+  try{
+    const ta=document.createElement("textarea");
+    ta.value=str;ta.setAttribute("readonly","");
+    ta.style.position="absolute";ta.style.left="-9999px";
+    document.body.appendChild(ta);
+    ta.select();ta.setSelectionRange(0,str.length);
+    const ok=document.execCommand("copy");document.body.removeChild(ta);return ok;
+  }catch(e){return false;}
+}
+$("#copy").addEventListener("click",async()=>{
+  const t=fullTranscript();
+  if(!t){tt(I18N[uiLang].nothingYet);return;}
+  const ok=await copyText(t);
+  tt(ok?I18N[uiLang].transcriptCopied:I18N[uiLang].nothingYet);
+});
+
+function doReset(){
+  if(recording)stop();
+  chapters=[];curBuf="";interim="";isFirstChapter=true;lastOverview=null;
+  segments=[];speakers=[];pitchSamples=[];
+  currentSpeaker=0;lastUtteranceEnd=0;lastActivityTs=0;
+  liveTxt.innerHTML='<span class="cursor"></span>';liveCard.style.display="none";
+  overview.style.display="none";refreshChapters();updateRecapBtn();
+  tt(I18N[uiLang].cleared);stat.textContent=I18N[uiLang].ready;
+}
+const resetModal=$("#resetModal");
+$("#clear").addEventListener("click",()=>{
+  // nothing to reset yet → just clear silently without nagging
+  if(!chapters.length&&!curBuf.trim()&&!recording){doReset();return;}
+  resetModal.classList.add("show");
+});
+$("#resetCancel").addEventListener("click",()=>resetModal.classList.remove("show"));
+resetModal.addEventListener("click",e=>{if(e.target===resetModal)resetModal.classList.remove("show");});
+$("#resetOk").addEventListener("click",()=>{resetModal.classList.remove("show");doReset();});
+
+$("#export").addEventListener("click",()=>{
+  const d=I18N[uiLang];
+  const ov=lastOverview;   // use the structured recap built by "Recap so far"
+  const dt=new Date().toLocaleString(uiLang==="it"?"it-IT":"en-US");
+
+  // ---- Rich Text Format builder ----
+  const E=s=>{ let o=""; for(const ch of String(s)){ const c=ch.codePointAt(0);
+    if(ch==="\\")o+="\\\\"; else if(ch==="{")o+="\\{"; else if(ch==="}")o+="\\}";
+    else if(c===10)o+="\\line "; else if(c<128)o+=ch;
+    else if(c<=0xFFFF)o+="\\u"+(c>32767?c-65536:c)+"?"; else o+="?"; } return o; };
+  const colorsHex=["#1a4d8f","#0c2b5c","#1c7fc0","#777777"].concat(PALETTE.map(p=>p.word));
+  const colorTbl=colorsHex.map(h=>{h=h.replace("#","");return `\\red${parseInt(h.slice(0,2),16)}\\green${parseInt(h.slice(2,4),16)}\\blue${parseInt(h.slice(4,6),16)};`;}).join("");
+  const SPK=sp=>5+(((sp%6)+6)%6);   // RTF color index for a speaker (palette starts at index 5)
+  const LS="\\sl276\\slmult1";        // 1.15× line spacing for readable body text
+  const H=(t,fs,ci)=>`{\\pard\\sb220\\sa80\\b\\fs${fs}\\cf${ci} ${E(t)}\\par}\n`;
+  const P=t=>`{\\pard${LS}\\sa100 ${E(t)}\\par}\n`;
+  const BUL=t=>`{\\pard${LS}\\fi-260\\li420\\sa50 \\u8226?\\tab ${E(t)}\\par}\n`;
+
+  let r=`{\\rtf1\\ansi\\ansicpg1252\\deff0\\paperw12240\\paperh15840\\margl1440\\margr1440\\margt1440\\margb1440\\fs23{\\fonttbl{\\f0\\fswiss\\fcharset0 Calibri;}}{\\colortbl;${colorTbl}}\n`;
+  r+=`{\\pard\\sa60\\b\\fs48\\cf1 ${E("Smart reporter — "+d.ovTitle)}\\par}\n`;
+  r+=`{\\pard\\sa240\\fs18\\cf4 ${E(dt+"  ·  "+totalWords()+" "+d.words)}\\par}\n`;
+
+  if(ov && ov.recap){
+    r+=H(d.ovTitle,28,2);
+    r+=P(ov.recap);
+    if(Array.isArray(ov.sections)&&ov.sections.length){
+      r+=H(d.bysection,23,3);
+      ov.sections.forEach((s,i)=>{
+        r+=H((i+1)+". "+(s.title||""),24,1);
+        if(s.summary)r+=P(s.summary);
+        if(Array.isArray(s.points))s.points.forEach(p=>r+=BUL(p));
+      });
+    } else if(Array.isArray(ov.bullets)&&ov.bullets.length){
+      r+=H(d.keypoints,23,3); ov.bullets.forEach(b=>r+=BUL(b));
+    }
+    if(Array.isArray(ov.questions)&&ov.questions.length){
+      r+=H(d.topq,23,3); ov.questions.slice(0,settings.nq).forEach((q,n)=>r+=P((n+1)+". "+q));
+    }
+    r+=`{\\pard\\sa160\\cf3 \\u8212?\\u8212?\\u8212?\\u8212?\\u8212?\\u8212?\\par}\n`;
+  }
+  chapters.forEach((c,i)=>{
+    r+=H((i+1)+". "+c.title+"  ("+(c.lang||"").toUpperCase()+" · "+c.words+" "+d.words+")",28,2);
+    if(c.recap)r+=P(c.recap);
+    if(Array.isArray(c.questions)&&c.questions.length){ r+=`{\\pard\\sa40\\b ${E(d.questions)}:\\par}\n`; c.questions.forEach(q=>r+=BUL(q)); }
+  });
+
+  // Full transcript, colored by speaker
+  const blocks=chapters.map(c=>c.segments&&c.segments.length?c.segments:[{speaker:0,text:c.text}]);
+  if(segments.length)blocks.push(segments);
+  const used=new Set(); blocks.forEach(segs=>segs.forEach(s=>used.add(s.speaker)));
+  if(blocks.length){
+    r+=H(d.fulltranscript,28,2);
+    if(used.size>1){
+      r+=`{\\pard\\sa140 `+[...used].sort((a,b)=>a-b).map(sp=>`{\\b\\cf${SPK(sp)}\\u9679?  ${E(d.speaker+" "+(sp+1))}}`).join("    ")+`\\par}\n`;
+    }
+    blocks.forEach(segs=>{
+      r+=`{\\pard${LS}\\sa140 `+segs.map(s=>`{\\cf${SPK(s.speaker)} ${E(s.text)}}`).join(" ")+`\\par}\n`;
+    });
+  }
+  r+="}";
+
+  const blob=new Blob([r],{type:"application/rtf"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`smart-reporter-${new Date().toISOString().slice(0,10)}.rtf`;
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+  tt(d.exported);
+});
+
+
+/* ---------- API key modal ----------
+   The modal has its own provider tab (keyModalProvider) so the person can
+   manage either key regardless of which provider is currently active in
+   Settings — switching tabs here does NOT change settings.provider.
+   Ollama is a third tab that shows endpoint + model + run instructions
+   instead of an API key (it needs none). */
+let keyModalProvider="anthropic";
+const KEY_PROVIDER_INFO={
+  anthropic:{placeholder:"sk-ant-...", link:"https://console.anthropic.com/settings/keys", linkLabel:"console.anthropic.com"},
+  glm:      {placeholder:"your GLM API key...", link:"https://open.bigmodel.cn/usercenter/apikeys", linkLabel:"open.bigmodel.cn"}
+};
+/* Cached "is Ollama reachable" probe result, so we don't refetch on every UI
+   paint. Refreshed on demand via the Test connection button. */
+let ollamaReachable=null;   // null = unknown, true/false = last probe result
+async function probeOllama(){
+  const ep=getOllamaEndpoint().replace(/\/+$/,"");
+  try{
+    const ctrl=new AbortController();
+    const t=setTimeout(()=>ctrl.abort(),3500);
+    const r=await fetch(ep+"/api/tags",{signal:ctrl.signal});
+    clearTimeout(t);
+    ollamaReachable=r.ok;
+    return ollamaReachable;
+  }catch(e){ ollamaReachable=false; return false; }
+}
+function updateKeyUI(){
+  const d=I18N[uiLang],st=document.getElementById("keyStatus"),btn=document.getElementById("keyBtn");
+  const onAnthropic=keyLooksValid(getApiKey("anthropic"),"anthropic"), onGlm=keyLooksValid(getApiKey("glm"),"glm");
+  const onOllama=settings.provider==="ollama";   // local provider is always "ready" if selected
+  const onActive=keyModalProvider==="anthropic"?onAnthropic:(keyModalProvider==="glm"?onGlm:onOllama);
+  const art=!onActive&&keyModalProvider==="anthropic"&&LLM.hasArtifact;
+  // The key icon in the header reflects whichever provider is active in Settings.
+  const activeOn=settings.provider==="anthropic"?onAnthropic:(settings.provider==="glm"?onGlm:onOllama);
+  if(btn)btn.classList.toggle("on",activeOn);
+  syncSeg("keyProviderTabs",keyModalProvider);
+  // Toggle between the API-key panel and the Ollama panel.
+  const isOllama=keyModalProvider==="ollama";
+  document.getElementById("keyApiKeyPanel").style.display=isOllama?"none":"";
+  document.getElementById("keyOllamaPanel").style.display=isOllama?"":"none";
+  if(isOllama){
+    // Populate endpoint + model inputs and the status line.
+    const epInput=document.getElementById("ollamaEndpointInput"), modelInput=document.getElementById("ollamaModelInput");
+    if(epInput && document.activeElement!==epInput)epInput.value=getOllamaEndpoint();
+    if(modelInput && document.activeElement!==modelInput)modelInput.value=getOllamaModel();
+    const ost=document.getElementById("ollamaStatus");
+    if(ost){
+      if(ollamaReachable===true){ost.textContent=d.ollamaConnected;ost.className="mstatus ok";}
+      else if(ollamaReachable===false){ost.textContent=d.ollamaNotConnected;ost.className="mstatus off";}
+      else {ost.textContent=d.ollamaProbeChecking;ost.className="mstatus off";}
+    }
+    set("t-ollamaSub",d.keySubOllama);
+    set("t-ollamaSetupTitle",d.ollamaSetupTitle);
+    document.getElementById("t-ollamaSetupSub").textContent=d.ollamaSetupSub;
+    set("t-ollamaStep1",d.ollamaStep1);
+    set("t-ollamaStep2",d.ollamaStep2);
+    set("t-ollamaStep3",d.ollamaStep3);
+    set("t-ollamaStep4",d.ollamaStep4);
+    set("t-ollamaStopTitle",d.ollamaStopTitle);
+    document.getElementById("t-ollamaStopHint").textContent=d.ollamaStopHint;
+    set("t-ollamaEndpoint",d.ollamaEndpoint);
+    set("t-ollamaModel",d.ollamaModel);
+    const probe=document.getElementById("ollamaProbe");
+    if(probe){
+      probe.classList.remove("ok","err");
+      if(ollamaReachable===true)probe.classList.add("ok");
+      else if(ollamaReachable===false)probe.classList.add("err");
+    }
+  } else {
+    if(st){st.textContent=onActive?d.connected:(art?d.artifactOn:d.notConnected);st.className="mstatus "+((onActive||art)?"ok":"off");}
+    const info=KEY_PROVIDER_INFO[keyModalProvider];
+    keyInput.placeholder=info.placeholder;
+    set("t-keySub", keyModalProvider==="anthropic"?d.keySubAnthropic:d.keySubGlm);
+    document.getElementById("t-keyNote").innerHTML=(keyModalProvider==="anthropic"?d.keyNoteAnthropic:d.keyNoteGlm)
+      .replace("{link}",info.link).replace("{linkLabel}",info.linkLabel);
+  }
+  updateSetKeyStatus();
+}
+function updateSetKeyStatus(){
+  const d=I18N[uiLang],el=document.getElementById("setKeyStatus");
+  if(!el)return;
+  const on=keyLooksValid(getApiKey(settings.provider),settings.provider);
+  el.textContent=on?d.keyMiniOn:d.keyMiniOff;
+  el.className="mstatus-mini "+(on?"ok":"off");
+}
+const keyModal=$("#keyModal"),keyInput=$("#keyInput");
+function openKey(provider){
+  keyModalProvider=provider||settings.provider;
+  if(keyModalProvider!=="ollama"){
+    keyInput.value=getApiKey(keyModalProvider);keyInput.type="password";
+  }
+  // Re-probe Ollama every time the modal opens on that tab, so the status is fresh.
+  if(keyModalProvider==="ollama"){ ollamaReachable=null; updateKeyUI(); probeOllama().then(()=>updateKeyUI()); }
+  updateKeyUI();keyModal.classList.add("show");
+}
+function closeKey(){keyModal.classList.remove("show");}
+$("#keyBtn").addEventListener("click",()=>openKey(settings.provider));
+$("#keyClose").addEventListener("click",closeKey);
+$("#ollamaClose").addEventListener("click",closeKey);
+keyModal.addEventListener("click",e=>{if(e.target===keyModal)closeKey();});
+$("#keyEye").addEventListener("click",()=>{keyInput.type=keyInput.type==="password"?"text":"password";});
+$("#keyProviderTabs").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  keyModalProvider=b.dataset.v;
+  if(keyModalProvider!=="ollama"){
+    keyInput.value=getApiKey(keyModalProvider);keyInput.type="password";
+  }
+  // Switching to the Ollama tab kicks off a fresh reachability probe so the
+  // status badge isn't stale from a previous session.
+  if(keyModalProvider==="ollama"){ ollamaReachable=null; updateKeyUI(); probeOllama().then(()=>updateKeyUI()); }
+  else updateKeyUI();
+});
+$("#keySave").addEventListener("click",()=>{
+  const k=keyInput.value.trim();
+  if(k&&!keyLooksValid(k,keyModalProvider)){tt(I18N[uiLang].keyBad);return;}
+  setApiKey(k,keyModalProvider);updateKeyUI();tt(k?I18N[uiLang].keySaved:I18N[uiLang].keyRemoved);
+  if(k)closeKey();
+});
+$("#keyClear").addEventListener("click",()=>{setApiKey("",keyModalProvider);keyInput.value="";updateKeyUI();tt(I18N[uiLang].keyRemoved);});
+/* Ollama: persist endpoint + model on Save, run a reachability probe on Test. */
+$("#ollamaSave").addEventListener("click",()=>{
+  setOllamaEndpoint(document.getElementById("ollamaEndpointInput").value);
+  setOllamaModel(document.getElementById("ollamaModelInput").value);
+  updateKeyUI();tt(I18N[uiLang].keySaved);closeKey();
+});
+$("#ollamaProbe").addEventListener("click",async function(){
+  // Persist the inputs first so the probe uses the values the user just typed.
+  setOllamaEndpoint(document.getElementById("ollamaEndpointInput").value);
+  setOllamaModel(document.getElementById("ollamaModelInput").value);
+  const d=I18N[uiLang];
+  ollamaReachable=null;updateKeyUI();
+  const ok=await probeOllama();
+  tt(ok?d.ollamaProbeOk:d.ollamaProbeErr);
+  updateKeyUI();
+});
+
+/* ---------- Settings modal ---------- */
+const setModal=$("#setModal");
+function syncSeg(id,val){const el=$("#"+id);if(el)[...el.children].forEach(x=>x.classList.toggle("on",x.dataset.v===String(val)));}
+function syncSettings(){
+  syncSeg("setProvider",settings.provider);syncSeg("setModel",settings.model);syncSeg("setVerb",settings.verb);syncSeg("setNq",settings.nq);
+  syncSeg("setChap",settings.chap);syncSeg("setSpeech",settings.speech);syncSeg("setOut",settings.out);syncSeg("setSplit",settings.split?1:0);
+  $("#chapLenGroup").style.display=settings.split?"":"none";
+  applyModelTierLabels();
+  updateSetKeyStatus();
+}
+/* Tier sublabels depend on which provider is selected, since the real model
+   names differ — keep the Fast/Balanced/Advanced concept but swap captions. */
+function applyModelTierLabels(){
+  const d=I18N[uiLang], p=settings.provider;
+  if(p==="glm"){
+    set("t-mFastS",d.mFastSGlm); set("t-mBalS",d.mBalSGlm); set("t-mAdvS",d.mAdvSGlm);
+  } else if(p==="ollama"){
+    set("t-mFastS",d.mFastSOllama); set("t-mBalS",d.mBalSOllama); set("t-mAdvS",d.mAdvSOllama);
+  } else {
+    set("t-mFastS",d.mFastS); set("t-mBalS",d.mBalS); set("t-mAdvS",d.mAdvS);
+  }
+}
+function openSet(){syncSettings();setModal.classList.add("show");}
+function closeSet(){setModal.classList.remove("show");}
+$("#setBtn").addEventListener("click",openSet);
+$("#setClose").addEventListener("click",closeSet);
+setModal.addEventListener("click",e=>{if(e.target===setModal)closeSet();});
+$("#setProvider").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  saveSetting("provider",b.dataset.v);
+  syncSeg("setProvider",settings.provider);
+  applyModelTierLabels();
+  updateSetKeyStatus();
+  updateKeyUI();
+  tt(I18N[uiLang].saved);
+});
+$("#setKeyBtn").addEventListener("click",()=>{closeSet();openKey(settings.provider);});
+function bindSeg(id,key,cast){
+  $("#"+id).addEventListener("click",e=>{
+    const b=e.target.closest("button");if(!b)return;
+    saveSetting(key, cast?cast(b.dataset.v):b.dataset.v);
+    syncSeg(id, key==="chap"?settings.chap:settings[key]);
+    tt(I18N[uiLang].saved);
+  });
+}
+bindSeg("setModel","model");
+bindSeg("setVerb","verb");
+bindSeg("setNq","nq",v=>parseInt(v,10));
+bindSeg("setChap","chap",v=>parseInt(v,10));
+
+// Split into chapters on/off — toggling mid-session folds any pending tail
+// into a single running chapter (off) or leaves chaptering live (on).
+$("#setSplit").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  const on=b.dataset.v==="1";
+  saveSetting("split",on);
+  syncSeg("setSplit",on?1:0);
+  $("#chapLenGroup").style.display=on?"":"none";
+  tt(I18N[uiLang].saved);
+  refreshChapters();renderLive();
+});
+
+// Spoken language → drives speech recognition (restart if recording)
+$("#setSpeech").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  saveSetting("speech",b.dataset.v);syncSeg("setSpeech",settings.speech);
+  if(recording&&recog){recog.lang=pickLang();try{recog.stop();}catch(_){}}
+  tt(I18N[uiLang].saved);
+});
+// Recap & questions language → also the UI/chrome language
+$("#setOut").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  saveSetting("out",b.dataset.v);uiLang=settings.out;
+  applyUI();refreshChapters();syncSettings();updateKeyUI();
+  tt(I18N[uiLang].saved);
+});
+
+/* ---------- Context panel ---------- */
+const ctxModal=$("#ctxModal");
+function fmtSize(n){ return n<1024?n+" B":n<1048576?(n/1024).toFixed(0)+" KB":(n/1048576).toFixed(1)+" MB"; }
+function fmtChars(n){ return n>=1000?(n/1000).toFixed(1)+"k chars":n+" chars"; }
+function persistCtxNow(){ context.objective=$("#ctxObjective").value; saveContext(); updateCtxBtn(); updateRecapBtn(); }
+function renderCtxFiles(){
+  const wrap=$("#ctxFiles");
+  wrap.innerHTML=(context.files||[]).map((f,i)=>{
+    let status;
+    if(f.parsing){ status=`<span class="sz parsing">parsing…</span>`; }
+    else if(f.parseError){ status=`<span class="sz err" title="${esc(f.parseError)}">⚠ name only</span>`; }
+    else if(f.text){ status=`<span class="sz">${esc(fmtChars(f.chars))}</span>`; }
+    else { status=`<span class="sz">name only</span>`; }
+    return `<div class="ctx-file"><span class="nm">📎 ${esc(f.name)}</span>${status}<button class="rm" data-i="${i}" title="Remove">×</button></div>`;
+  }).join("");
+  wrap.querySelectorAll(".rm").forEach(b=>b.addEventListener("click",()=>{ context.files.splice(+b.dataset.i,1); persistCtxNow(); renderCtxFiles(); }));
+}
+function updateCtxBtn(){ $("#ctxBtn").classList.toggle("on",hasContext()); }
+function openCtx(){ $("#ctxObjective").value=context.objective||""; renderCtxFiles(); ctxModal.classList.add("show"); }
+function closeCtx(){ persistCtxNow(); ctxModal.classList.remove("show"); }   // keep context up to date even without Save
+$("#ctxBtn").addEventListener("click",openCtx);
+$("#ctxClose").addEventListener("click",closeCtx);
+ctxModal.addEventListener("click",e=>{if(e.target===ctxModal)closeCtx();});
+$("#ctxAttach").addEventListener("click",()=>$("#ctxFileInput").click());
+// Accept PDF, Word (.docx), PowerPoint (.pptx) and any text-like file. Each
+// file is parsed in-browser and its text added to the prompt context, so the
+// content is available for recaps and questions even before transcription
+// starts. Unsupported binary formats (e.g. legacy .doc/.ppt) attach by name
+// only — the user can paste their text into the objective box above.
+$("#ctxFileInput").addEventListener("change",async e=>{
+  const files=[...e.target.files];
+  e.target.value="";
+  if(!files.length)return;
+  // Add placeholder entries immediately so the user sees something happening,
+  // then parse each file and fill in the text. This matters for big PDFs that
+  // take a few seconds to extract.
+  const placeholders=files.map(f=>({name:f.name, text:"", chars:0, parsing:true, parseError:null}));
+  placeholders.forEach(p=>context.files.push(p));
+  persistCtxNow(); renderCtxFiles();
+  for(let i=0;i<files.length;i++){
+    const f=files[i], p=placeholders[i];
+    const r=await extractFileText(f);
+    p.text=r.text; p.chars=r.text.length; p.parsing=false; p.parseError=r.parseError;
+    persistCtxNow(); renderCtxFiles();
+  }
+  // Surface any parse failures (non-fatal — the file still attaches by name).
+  const failed=placeholders.filter(p=>p.parseError);
+  if(failed.length)tt(I18N[uiLang].ctxParseFailed.replace("{n}",failed.length));
+  else tt(I18N[uiLang].ctxAttached.replace("{n}",files.length));
+});
+$("#ctxSave").addEventListener("click",()=>{
+  persistCtxNow(); tt(I18N[uiLang].ctxSaved); closeCtx();
+});
+
+/* ---------- Saved sessions (history) ---------- */
+const SESS_STORE="cc_sessions";
+const histModal=$("#histModal");
+function loadSessions(){ try{ const a=JSON.parse(localStorage.getItem(SESS_STORE)); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function persistSessions(a){ try{ localStorage.setItem(SESS_STORE,JSON.stringify(a)); }catch(e){} }
+function autoTitle(){ if(chapters[0]&&chapters[0].title&&!chapters[0].pending)return chapters[0].title; const w=allText().split(/\s+/).filter(Boolean).slice(0,6).join(" "); return w||I18N[uiLang].untitled; }
+function saveSession(title){
+  if(!chapters.length&&!curBuf.trim()){ tt(I18N[uiLang].noContent); return; }
+  const sessions=loadSessions();
+  sessions.unshift({
+    id:Date.now(), title:(title&&title.trim())||autoTitle(), date:new Date().toISOString(), words:totalWords(),
+    chapters:JSON.parse(JSON.stringify(chapters)), tail:JSON.parse(JSON.stringify(segments)), curBuf,
+    overview:lastOverview?JSON.parse(JSON.stringify(lastOverview)):null,
+    speakers:JSON.parse(JSON.stringify(speakers)),
+    context:JSON.parse(JSON.stringify(context)), out:settings.out, speech:settings.speech
+  });
+  persistSessions(sessions); renderSessions(); tt(I18N[uiLang].sessionSaved);
+}
+function deleteSession(id){
+  persistSessions(loadSessions().filter(s=>s.id!==id)); renderSessions(); tt(I18N[uiLang].sessionDeleted);
+}
+function openSession(id){
+  const s=loadSessions().find(x=>x.id===id); if(!s)return;
+  if(recording)stop();
+  chapters=s.chapters||[]; segments=s.tail||[]; curBuf=s.curBuf||""; lastOverview=s.overview||null;
+  speakers=s.speakers||[]; context=s.context||{objective:"",files:[]};
+  isFirstChapter=!chapters.length; currentSpeaker=0;
+  if(s.speech&&(s.speech==="en"||s.speech==="it"))saveSetting("speech",s.speech);
+  if(s.out&&(s.out==="en"||s.out==="it")){saveSetting("out",s.out);uiLang=s.out;}
+  applyUI(); refreshChapters();
+  if(chapters.length||curBuf.trim()){liveCard.style.display="block";renderLive();} else liveCard.style.display="none";
+  if(lastOverview){ renderOverviewFrom(lastOverview); } else overview.style.display="none";
+  updateCtxBtn(); updateRecapBtn(); syncSettings();
+  closeHist(); tt(I18N[uiLang].sessionLoaded);
+  stat.textContent=I18N[uiLang].stopped;
+}
+function renderSessions(){
+  const list=$("#histList"), sessions=loadSessions(), d=I18N[uiLang];
+  if(!sessions.length){ list.innerHTML=`<div class="hist-empty">${d.noSessions}</div>`; return; }
+  list.innerHTML=sessions.map(s=>{
+    const dt=new Date(s.date).toLocaleString(uiLang==="it"?"it-IT":"en-US",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});
+    return `<div class="hist-item" data-id="${s.id}"><div class="meta"><div class="ti">${esc(s.title)}</div><div class="sub">${esc(dt)} · ${s.words||0} ${esc(d.words)}</div></div>
+      <button class="open" data-act="open">${esc(d.open)}</button><button class="del" data-act="del">${esc(d.del)}</button></div>`;
+  }).join("");
+  list.querySelectorAll(".hist-item").forEach(it=>{
+    const id=+it.dataset.id;
+    it.querySelector('[data-act="open"]').addEventListener("click",()=>openSession(id));
+    it.querySelector('[data-act="del"]').addEventListener("click",()=>{ if(confirm(d.confirmDelete))deleteSession(id); });
+  });
+}
+function openHist(){ $("#histName").value=autoTitle(); renderSessions(); histModal.classList.add("show"); }
+function closeHist(){ histModal.classList.remove("show"); }
+$("#histBtn").addEventListener("click",openHist);
+$("#histClose").addEventListener("click",closeHist);
+histModal.addEventListener("click",e=>{if(e.target===histModal)closeHist();});
+$("#histSave").addEventListener("click",()=>saveSession($("#histName").value));
+$("#histName").addEventListener("keydown",e=>{if(e.key==="Enter")saveSession($("#histName").value);});
+
+/* Render an overview object into the panel (used when loading a saved session). */
+function renderOverviewFrom(a){
+  const d=I18N[uiLang];
+  const sectionsHtml=ovSectionsHtml(a,d);
+  const icCopy='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>';
+  const icShare='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/></svg>';
+  const icTxt='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v5h5"/><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M9 13h6M9 17h4"/></svg>';
+  overview.style.display="block";
+  overview.innerHTML=`
+    <div class="ov-hd"><div class="ic">✨</div><div class="ti">${d.ovTitle}</div><div class="tm">${a._src==="llm"?"AI":"·"} · ${totalWords()} ${d.words}</div></div>
+    <div class="ov-actions"><button class="ov-act" data-act="copy">${icCopy}${d.actCopy}</button><button class="ov-act" data-act="share">${icShare}${d.actShare}</button><button class="ov-act" data-act="txt">${icTxt}${d.actTxt}</button></div>
+    <div class="ov-recap">${esc(a.recap)}</div>
+    ${sectionsHtml}
+    ${(settings.nq>0&&a.questions&&a.questions.length)?`<div class="qh" style="margin-bottom:9px">★ ${d.topq}</div>${a.questions.slice(0,settings.nq).map((q,n)=>`<div class="ov-q"><span class="n">${n+1}</span><span>${esc(q)}</span></div>`).join("")}`:""}`;
+  overview.querySelectorAll(".ov-q").forEach(q=>q.addEventListener("click",()=>{navigator.clipboard?.writeText(q.textContent.replace(/^\d+/,"").trim());tt(d.qCopied);}));
+  overview.querySelectorAll(".ov-act").forEach(b=>b.addEventListener("click",()=>recapAction(b.dataset.act)));
+  bindOvSectionJumps(overview);
+}
+
+/* ---------- Ask the transcript ---------- */
+const askModal=$("#askModal");
+function openAsk(){ askModal.classList.add("show"); setTimeout(()=>$("#askInput").focus(),50); }
+function closeAsk(){ askModal.classList.remove("show"); }
+$("#askBtn").addEventListener("click",openAsk);
+$("#askClose").addEventListener("click",closeAsk);
+askModal.addEventListener("click",e=>{if(e.target===askModal)closeAsk();});
+async function sendAsk(){
+  const d=I18N[uiLang], q=$("#askInput").value.trim(); if(!q)return;
+  if(!fullTranscript().trim()&&!hasContext()){tt(d.askNothing);return;}   // need context OR transcript
+  if(!LLM.enabled){tt(d.askNoLLM);return;}
+  const log=$("#askLog");
+  log.insertAdjacentHTML("beforeend",`<div class="ask-q">${esc(q)}</div><div class="ask-a think">${d.askThinking}</div>`);
+  $("#askInput").value=""; log.scrollTop=log.scrollHeight;
+  const aEl=log.lastElementChild;
+  try{ const ans=await LLM.ask(q); aEl.classList.remove("think"); aEl.textContent=ans||"…"; }
+  catch(err){ aEl.classList.remove("think"); aEl.textContent="⚠️ "+(err&&err.message||"error"); }
+  log.scrollTop=log.scrollHeight;
+}
+$("#askSend").addEventListener("click",sendAsk);
+$("#askInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendAsk();});
+
+loadSettings();loadContext();
+applyUI();updateRecapBtn();updateKeyUI();syncSettings();updateCtxBtn();
+</script>
+</body>
+</html>
